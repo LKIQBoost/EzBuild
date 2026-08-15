@@ -37,6 +37,8 @@ _FACING_UP = 1
 _FACING_DOWN = 0
 _FACING_SOUTH = 3
 _FACING_NORTH = 2
+_FACING_EAST = 5
+_FACING_WEST = 4
 
 
 def _build_playsound(note, edition: str) -> str:
@@ -66,34 +68,49 @@ def _build_playsound(note, edition: str) -> str:
     return f"execute as @a at @s run playsound {note.sound} @s {pos} {v} {p} {v}"
 
 
-def _serpentine(n: int, depth: int, max_height: int):
-    """生成 n 个位置的蛇形路径与朝向。
+def _serpentine(n: int, width: int, depth: int, max_height: int):
+    """生成 n 个位置的 3D 蛇形路径与朝向。
 
-    布局：x=0 单列，沿 z 往返（depth 深），行间沿 +y 上升；
-    每块的朝向指向下一块。返回 (positions, facings, height, depth)。
-    超出 ``max_height`` 时自动加深 ``depth``。
+    布局与 midi-mcstructure_next 推荐大模板（16×96×16）一致：
+    每层在 width×depth 平面上水平蛇形（沿 z 往返、行间 +x），
+    层间沿 +y 上升；每块朝向指向下一块。
+    高度超过 ``max_height`` 时按比例增大足迹（保持方形）。
+
+    返回 (positions, facings, width, height, depth)。
     """
-    height = max(1, math.ceil(n / depth))
+    per_floor = width * depth
+    height = max(1, math.ceil(n / per_floor))
     if height > max_height:
-        depth = max(1, math.ceil(n / max_height))
-        height = max_height
+        # 增大足迹：side² >= ceil(n / max_height)
+        side = max(width, depth, math.ceil(math.sqrt(math.ceil(n / max_height))))
+        width = depth = side
+        per_floor = width * depth
+        height = max(1, math.ceil(n / per_floor))
 
     positions = []
     for i in range(n):
-        y = i // depth
-        z = i % depth
-        if y % 2 == 1:
+        y = i // per_floor
+        rem = i % per_floor
+        row = rem // depth
+        z = rem % depth
+        if row % 2 == 1:
             z = depth - 1 - z
-        positions.append((0, y, z))
+        # 层间 x 方向交替（偶数层 x 0→width-1，奇数层反向），与参考模板一致
+        x = row if y % 2 == 0 else width - 1 - row
+        positions.append((x, y, z))
 
     facings = []
     for i in range(n - 1):
-        _, y1, z1 = positions[i]
-        _, y2, z2 = positions[i + 1]
+        x1, y1, z1 = positions[i]
+        x2, y2, z2 = positions[i + 1]
         if y2 > y1:
             facings.append(_FACING_UP)
         elif y2 < y1:
             facings.append(_FACING_DOWN)
+        elif x2 > x1:
+            facings.append(_FACING_EAST)
+        elif x2 < x1:
+            facings.append(_FACING_WEST)
         elif z2 > z1:
             facings.append(_FACING_SOUTH)
         elif z2 < z1:
@@ -102,18 +119,21 @@ def _serpentine(n: int, depth: int, max_height: int):
             facings.append(_FACING_SOUTH)
     facings.append(_FACING_UP)  # 末块朝向任意
 
-    return positions, facings, height, depth
+    return positions, facings, width, height, depth
 
 
 def song_to_building(
     song: Song,
     *,
-    max_height: int = 320,
+    width: int = 16,
     depth: int = 16,
+    max_height: int = 96,
     edition: str = "bedrock",
 ) -> Building:
     """把一首歌转成命令方块音乐机建筑。
 
+    - ``width``/``depth``: 水平足迹（默认 16×16，接近正方体，与
+      midi-mcstructure_next 推荐大模板一致）；``max_height`` 超过时自动增大足迹。
     - ``edition``: ``"bedrock"`` / ``"java"``，决定 /playsound 语法。
     - 音符按 1/20 秒量化到游戏刻，同一刻的多个音符延迟为 0（同时播放）。
     """
@@ -142,8 +162,10 @@ def song_to_building(
         last = tick
 
     # 3. 蛇形布局 + 4. 写 Building
-    positions, facings, height, depth_used = _serpentine(len(cmd_list), depth, max_height)
-    building = Building(size=(1, height, depth_used), source_format="music")
+    positions, facings, width_used, height, depth_used = _serpentine(
+        len(cmd_list), width, depth, max_height
+    )
+    building = Building(size=(width_used, height, depth_used), source_format="music")
     for i, (delay, cmd) in enumerate(cmd_list):
         x, y, z = positions[i]
         mode = MODE_IMPULSE if i == 0 else MODE_CHAIN

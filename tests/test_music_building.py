@@ -20,20 +20,18 @@ def _make_song(n=10) -> Song:
     return song
 
 
-def _facing_of(building, x, y, z):
-    for blk in building.blocks:
-        if (blk.x, blk.y, blk.z) == (x, y, z):
-            return blk.states["facing_direction"]
-    raise KeyError((x, y, z))
+def _facing_map(building):
+    return {(blk.x, blk.y, blk.z): blk.states["facing_direction"] for blk in building.blocks}
 
 
 def _chain_continuous(building) -> bool:
     """每块命令方块朝向是否指向链中下一块。"""
+    pos_facing = _facing_map(building)
     cbs = building.command_blocks
     for i in range(len(cbs) - 1):
         cx, cy, cz = cbs[i].x, cbs[i].y, cbs[i].z
         nx, ny, nz = cbs[i + 1].x, cbs[i + 1].y, cbs[i + 1].z
-        f = _facing_of(building, cx, cy, cz)
+        f = pos_facing[(cx, cy, cz)]
         dx = dy = dz = 0
         if f == 1:
             dy = 1
@@ -146,12 +144,21 @@ class TestSongToBuilding:
         b = song_to_building(song)
         assert b.command_block_count == 1
 
-    def test_large_song_auto_deepen(self):
-        """超过 16*320 = 5120 音符时自动加深。"""
-        song = _make_song(6000)
+    def test_cube_footprint(self):
+        """默认 16×16 方形足迹（与参考大模板一致），不再是单列细长条。"""
+        song = _make_song(100)
         b = song_to_building(song)
-        assert b.command_block_count == 6000
-        assert b.size[1] <= 320  # 高度不超过上限
+        assert b.size[0] == 16
+        assert b.size[2] == 16
+        assert b.size[1] == 1  # 100/256 -> 1 层
+
+    def test_large_song_auto_grow_footprint(self):
+        """超过 16*16*96 = 24576 音符时自动增大足迹，高度不超过 max_height。"""
+        song = _make_song(30000)
+        b = song_to_building(song)
+        assert b.command_block_count == 30000
+        assert b.size[1] <= 96
+        assert b.size[0] > 16  # 足迹增大了
         assert _chain_continuous(b)
 
 

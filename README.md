@@ -139,10 +139,11 @@ ezbuild/
 - 力度为有效音量（MIDI 通道音量 CC7 / NBS 层音量会折入音符力度）。
 
 **音乐 → 建筑**（`ezbuild.music_builder.song_to_building`）：
-把 Song 转成"命令方块音乐机"——一串命令方块沿 1 列蛇形排列，每块
-`facing_direction` 指向下一块；第 0 块为脉冲命令方块（红石触发启动），
-其余为连锁命令方块（auto）；每块写一条 `/execute ... playsound`，`TickDelay`
-为距上一音符的游戏刻数（1 秒 = 20 刻），总时长 = 各块 TickDelay 累加。
+把 Song 转成"命令方块音乐机"——一串命令方块沿 **16×16 方形足迹的 3D 蛇形**
+排列（与 midi-mcstructure_next 推荐大模板一致，接近正方体；超过 96 层自动
+增大足迹），每块 `facing_direction` 指向下一块；第 0 块为脉冲命令方块
+（红石触发启动），其余为连锁命令方块（auto）；每块写一条 `/execute ... playsound`，
+`TickDelay` 为距上一音符的游戏刻数（1 秒 = 20 刻），总时长 = 各块 TickDelay 累加。
 音高 `2**((note-66)/12)`（与 NBS key 45↔note 66 一致），鼓固定 pitch 1.0，
 超范围钳制 [0.5, 2.0]。可用 `--edition bedrock|java` 切换 /playsound 语法。
 
