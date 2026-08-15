@@ -176,15 +176,41 @@ def _is_continuous(
     return True
 
 
+def _layer_continuous(
+    blocks, x1, y1, z1, x2, y2, z2, name: str, states: str, axis: str
+) -> bool:
+    """扩展某轴时，只检查**新增的那一层**是否全为 (name, states)。
+
+    区域在此之前已被验证为实心，因此只要新增层连续，扩展后仍实心。
+    把 O(体积) 的重复检查降为 O(单层)。
+    """
+    if axis == "x":  # 新增 x = x2 平面
+        for y in range(y1, y2 + 1):
+            for z in range(z1, z2 + 1):
+                if blocks.get((x2, y, z)) != (name, states):
+                    return False
+    elif axis == "y":  # 新增 y = y2 层
+        for x in range(x1, x2 + 1):
+            for z in range(z1, z2 + 1):
+                if blocks.get((x, y2, z)) != (name, states):
+                    return False
+    else:  # 新增 z = z2 层
+        for x in range(x1, x2 + 1):
+            for y in range(y1, y2 + 1):
+                if blocks.get((x, y, z2)) != (name, states):
+                    return False
+    return True
+
+
 def _grow_region(blocks, start, name: str, states: str):
     """从起点向 x/y/z 三个方向扩展，找到最大连续同方块区域。"""
     x, y, z = start
     xe, ye, ze = x, y, z
-    while _is_continuous(blocks, x, y, z, xe + 1, ye, ze, name, states):
+    while _layer_continuous(blocks, x, y, z, xe + 1, ye, ze, name, states, "x"):
         xe += 1
-    while _is_continuous(blocks, x, y, z, xe, ye + 1, ze, name, states):
+    while _layer_continuous(blocks, x, y, z, xe, ye + 1, ze, name, states, "y"):
         ye += 1
-    while _is_continuous(blocks, x, y, z, xe, ye, ze + 1, name, states):
+    while _layer_continuous(blocks, x, y, z, xe, ye, ze + 1, name, states, "z"):
         ze += 1
     return (x, y, z), (xe, ye, ze)
 

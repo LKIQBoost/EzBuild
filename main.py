@@ -41,15 +41,49 @@ def _read_building(src: str, mapping_file: str | None) -> ezbuild.Building | ezb
     return ezbuild.convert_read(src)
 
 
+def _output_path(src: str, to_format: str, args: argparse.Namespace) -> str:
+    """计算输出路径：-o 指定，否则按输入名 + 输出扩展名（同路径时加后缀）。"""
+    if args.output is not None:
+        if len(args.input) > 1:
+            raise ValueError("-o/--output 仅支持单个输入文件")
+        return args.output
+    writer_cls = registry.get_writer(to_format)
+    ext = writer_cls.extensions[0] if writer_cls else ".out"
+    output = str(Path(src).with_suffix(ext))
+    if Path(output) == Path(src):
+        # 输入输出同路径（如 txt → txt），加后缀避免覆盖
+        suffix = "_分区块" if to_format == "txt" else "_转换"
+        output = str(Path(src).with_name(Path(src).stem + suffix + Path(src).suffix))
+    return output
+
+
 def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
     """转换单个文件，返回 (输出路径, 输出格式)。出错抛异常。"""
     start = time.monotonic()
     if not Path(src).is_file():
         raise FileNotFoundError(f"输入文件不存在: {src}")
 
+    to_format = args.format  # 第一个位置参数（输出格式，必填）
+
+    # schem -> txt：流式增量转换，避免巨型 schem 载入整座建筑占满内存
+    if registry.format_for_path(src) == "schem" and to_format == "txt":
+        from ezbuild.streaming import schem_to_txt
+
+        output = _output_path(src, to_format, args)
+        print(f"[1/2] 流式转换: {src}")
+        schem_to_txt(
+            src, output,
+            fill_merge=not args.nofill,
+            strip_states=frozenset() if args.all_states else None,
+            progress=True,
+        )
+        elapsed = time.monotonic() - start
+        print(f"[2/2] 输出格式 txt -> {output}")
+        print(f"      转换完成 ✓（耗时 {_fmt_duration(elapsed)}）")
+        return output, to_format
+
     print(f"[1/2] 读取: {src}")
     building = _read_building(src, args.mapping)
-    to_format = args.format  # 第一个位置参数（输出格式，必填）
     if isinstance(building, ezbuild.Song) and to_format not in ezbuild.MUSIC_FORMATS:
         # 音乐 → 建筑：先转成命令方块音乐机
         building = ezbuild.song_to_building(building, edition=args.edition)
@@ -65,20 +99,7 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
             f"      方块 {building.block_count} 个，命令方块 {building.command_block_count} 个"
         )
 
-    if args.output is not None:
-        if len(args.input) > 1:
-            raise ValueError("-o/--output 仅支持单个输入文件")
-        output = args.output
-    else:
-        writer_cls = registry.get_writer(to_format)
-        ext = writer_cls.extensions[0] if writer_cls else ".out"
-        output = str(Path(src).with_suffix(ext))
-        if Path(output) == Path(src):
-            # 输入输出同路径（如 txt → txt），加后缀避免覆盖
-            suffix = "_分区块" if to_format == "txt" else "_转换"
-            output = str(
-                Path(src).with_name(Path(src).stem + suffix + Path(src).suffix)
-            )
+    output = _output_path(src, to_format, args)
 
     print(f"[2/2] 输出格式 {to_format} -> {output}")
     writer_cls = registry.get_writer(to_format)

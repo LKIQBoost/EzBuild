@@ -13,6 +13,7 @@ import gzip
 import io
 
 import nbtlib
+import numpy as np
 
 from ..model import Block, Building, CommandBlock, COMMAND_BLOCK_MODES, MODE_IMPULSE
 from ..utils import (
@@ -22,6 +23,16 @@ from ..utils import (
     tag_to_python,
 )
 from .base import Reader, Source
+
+
+def _as_uint8(block_data) -> np.ndarray:
+    """把 BlockData 转为普通无符号字节 ndarray（0-255）。
+
+    nbtlib 的 ByteArray 是有符号 int8 子类（索引 >127 变负号导致丢方块，
+    且覆盖 ``__getitem__`` 不支持多维切片）；``np.asarray(..., uint8)``
+    转为普通 ndarray 并按位重解释索引。
+    """
+    return np.asarray(block_data, dtype=np.uint8)
 
 
 def _parse_blockstate(s: str) -> tuple[str, dict]:
@@ -53,33 +64,53 @@ class SchemReader(Reader):
 
         W, H, L = int(schem["Width"]), int(schem["Height"]), int(schem["Length"])
         offset = tag_to_python(schem.get("Offset", [0, 0, 0]))
-        palette = tag_to_python(schem["Palette"])          # {方块状态串: 索引}
-        palette_inv = {idx: name for name, idx in palette.items()}
-        block_data = tag_to_python(schem["BlockData"])     # 索引数组
+
+        # 预计算调色板：索引 -> (方块名, 状态)。只解析唯一方块状态（通常几百个），
+        # 每个非空气格共用同一个 (name, states) 对象，避免重复解析与内存膨胀。
+        parsed: dict[int, tuple[str, dict]] = {}
+        for blockstate, idx in schem["Palette"].items():
+            parsed[int(idx)] = _parse_blockstate(blockstate)
+        air_indices = {i for i, (n, _) in parsed.items() if not n or n == "air"}
 
         building = Building(size=(W, H, L), source_format=self.format_name)
-        blocks_by_pos: dict[tuple[int, int, int], Block] = {}
-
         total = W * H * L
-        for i in range(min(total, len(block_data))):
-            idx = block_data[i]
-            if idx == -1:
+        bd = _as_uint8(schem["BlockData"])
+        if bd.size <= 0 or total <= 0:
+            return building
+
+        # numpy 向量化找出非空气格的索引，避免 Python 逐格循环 1.8 亿次
+        if len(air_indices) == 1:
+            mask = bd != next(iter(air_indices))
+        elif air_indices:
+            mask = ~np.isin(bd, list(air_indices))
+        else:
+            mask = np.ones(bd.size, dtype=bool)
+        non_air = np.nonzero(mask)[0]
+        del mask
+
+        # 有 BlockEntities 才构建位置字典（大型建筑可省几 GB）
+        blocks_by_pos: dict[tuple[int, int, int], Block] | None = (
+            {} if schem.get("BlockEntities") is not None else None
+        )
+
+        for i in non_air:
+            if i >= total:
+                break
+            item = parsed.get(int(bd[i]))
+            if item is None:
                 continue
-            blockstate = palette_inv.get(idx)
-            if blockstate is None:
-                continue
-            name, states = _parse_blockstate(blockstate)
-            if not name or name == "air":
-                continue
+            name, states = item
             # 相对坐标 + Offset = 绝对世界坐标（与 buildtool 一致）
             x = (i % W) + offset[0]
             z = ((i // W) % L) + offset[2]
             y = ((i // (W * L)) % H) + offset[1]
             blk = Block(x=x, y=y, z=z, name=name, states=states)
             building.blocks.append(blk)
-            blocks_by_pos[(x, y, z)] = blk
+            if blocks_by_pos is not None:
+                blocks_by_pos[(x, y, z)] = blk
 
-        self._parse_block_entities(schem, building, blocks_by_pos)
+        if blocks_by_pos is not None:
+            self._parse_block_entities(schem, building, blocks_by_pos)
         return building
 
     # ------------------------------------------------------------------ 内部

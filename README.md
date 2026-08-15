@@ -54,6 +54,10 @@ python main.py mcstructure -i 歌曲.mid --edition java
 # Java Sponge .schem 结构文件读写
 python main.py mcstructure -i 建筑.schem
 python main.py schem -i 建筑.bdx
+
+# schem → txt 自动走**流式增量转换**（按 16×16 区块列逐块读写，
+# 千万级方块的巨型 schem 也不会占满内存）
+python main.py txt -i 巨型建筑.schem
 ```
 
 > setblock/fill 输出默认省略所有 `*_bit` 开关状态（`open_bit`/`toggle_bit`/`powered_bit` 等），
@@ -205,3 +209,4 @@ python -m pytest tests/ -q
 
 - `nbtlib` — mcstructure / NBT 解析
 - `brotli` — BDX 解压
+- `tqdm` — 流式转换进度条

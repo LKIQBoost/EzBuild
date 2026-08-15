@@ -28,8 +28,9 @@ from .music_builder import song_to_building
 
 # 触发 readers / writers 子模块自动注册
 from . import readers, writers  # noqa: E402,F401
+from .streaming import schem_to_txt  # noqa: E402
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "model",
@@ -43,6 +44,7 @@ __all__ = [
     "Note",
     "Layer",
     "song_to_building",
+    "schem_to_txt",
     "convert_read",
     "convert_write",
     "auto_convert",

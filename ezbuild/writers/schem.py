@@ -96,6 +96,9 @@ class SchemWriter(Writer):
                 f"方块种类 {len(palette_map)} 超过 Sponge .schem 调色板上限 "
                 f"{MAX_PALETTE}（ByteArray 编码）"
             )
+        # nbtlib ByteArray 是 int8（有符号），调色板索引 >127 需转成补码字节
+        # （0-255 -> -128..127），读取端按无符号重解释回来。
+        block_data = [v if v < 128 else v - 256 for v in block_data]
 
         root = Compound(
             {

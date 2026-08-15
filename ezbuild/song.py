@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 # 中立模型
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class Note:
     """一个音符（中立表示）。
 
@@ -48,7 +48,7 @@ class Note:
     duration: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class Layer:
     """NBS 层元数据（id 与名字；音量已折入音符 velocity）。"""
 
@@ -56,7 +56,7 @@ class Layer:
     name: str = ""
 
 
-@dataclass
+@dataclass(slots=True)
 class Song:
     """一首完整的歌（中立表示）。
 

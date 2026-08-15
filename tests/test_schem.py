@@ -124,3 +124,37 @@ class TestCompatibility:
     def test_registered(self):
         assert "schem" in ezbuild.registry.list_readers()
         assert "schem" in ezbuild.registry.list_writers()
+
+
+class TestStreaming:
+    def test_streaming_matches_non_streaming(self, tmp_path):
+        """schem -> txt 流式输出与非流式逐字节一致。"""
+        from ezbuild.streaming import schem_to_txt
+
+        b = _make_building()
+        data = ezbuild.registry.get_writer("schem")().render(b)
+        non_stream = ezbuild.registry.get_writer("txt")().render(b)
+
+        out = tmp_path / "s.txt"
+        schem_to_txt(data, out)
+        assert out.read_text(encoding="utf-8") == non_stream
+
+    def test_high_palette_index_roundtrip(self):
+        """调色板索引 >127 的方块不再丢失（无符号字节解码）。"""
+        b = Building()
+        for i in range(150):  # 150 种不同方块，最后一种索引 149 > 127
+            b.blocks.append(Block(x=i, y=0, z=0, name=f"block_{i}"))
+        data = ezbuild.registry.get_writer("schem")().render(b)
+        b2 = ezbuild.convert_read_from(data, "schem")
+        names = {blk.name for blk in b2.blocks}
+        assert len(names) == 150
+        assert "block_0" in names and "block_149" in names
+
+    def test_streaming_bytes_source(self, tmp_path):
+        from ezbuild.streaming import schem_to_txt
+
+        data = ezbuild.registry.get_writer("schem")().render(_make_building())
+        out = tmp_path / "s.txt"
+        schem_to_txt(data, out)
+        text = out.read_text(encoding="utf-8")
+        assert "setblock" in text or "fill" in text

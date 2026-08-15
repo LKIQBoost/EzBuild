@@ -37,7 +37,7 @@ COMMAND_BLOCK_MODES: dict[str, int] = {
 COMMAND_BLOCK_NAMES: frozenset[str] = frozenset(COMMAND_BLOCK_IDS.values())
 
 
-@dataclass
+@dataclass(slots=True)
 class Block:
     """一个方块：位置 + 方块名 + 方块状态 + （可选的）方块实体 NBT。
 
@@ -54,7 +54,7 @@ class Block:
     nbt: dict[str, Any] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class CommandBlock:
     """命令方块：从建筑中抽取出的命令方块语义数据。
 
@@ -80,7 +80,7 @@ class CommandBlock:
         return COMMAND_BLOCK_IDS[self.mode]
 
 
-@dataclass
+@dataclass(slots=True)
 class Building:
     """一个完整的建筑（中立表示）。
 

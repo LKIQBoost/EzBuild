@@ -8,6 +8,7 @@ dependencies = [
     "brotli>=1.2.0",
     "nbtlib>=2.0.4",
     "pyfiglet>=1.0.4",
+    "tqdm>=4.70.0",
 ]
 
 [project.scripts]
