@@ -50,6 +50,10 @@ python main.py cmd_json -i 歌曲.mid      # 命令方块 JSON（lemon 格式）
 python main.py ibi -i 歌曲.mid           # IBI 导入包
 # Java 版 /playsound 语法
 python main.py mcstructure -i 歌曲.mid --edition java
+
+# Java Sponge .schem 结构文件读写
+python main.py mcstructure -i 建筑.schem
+python main.py schem -i 建筑.bdx
 ```
 
 > setblock/fill 输出默认省略所有 `*_bit` 开关状态（`open_bit`/`toggle_bit`/`powered_bit` 等），
@@ -72,6 +76,7 @@ ezbuild.convert_write(building, "命令方块.json", "cmd_json")  # 输出
 | 输入 | `bdx` | 基岩版 BDX 建筑文件 |
 | 输入 | `mcstructure` | 基岩版 `.mcstructure` 结构文件 |
 | 输入 | `schematic` | Java 版经典 `.schematic` 结构文件 |
+| 输入 | `schem` | Java 版 Sponge `.schem` 结构文件（Palette/BlockData） |
 | 输入 | `txt` | `setblock`/`fill` 指令文本（未分区块） |
 | 输入 | `ibi` | IBI 导入包（setblock 文本 + 命令方块 JSON，XOR 加密） |
 | 输入 | `mid` | MIDI（SMF）音乐文件 |
@@ -80,6 +85,7 @@ ezbuild.convert_write(building, "命令方块.json", "cmd_json")  # 输出
 | 输出 | `txt` | 分区块优化 txt：16×16 区块 + S 型排序 + tp 导航（默认 fill 三维合并，`--nofill` 关闭） |
 | 输出 | `ibi` | IBI 导入包（setblock 文本 + 命令方块 JSON，XOR 加密打包） |
 | 输出 | `mcstructure` | 基岩版 `.mcstructure` 结构文件（建筑写出，未压缩 NBT） |
+| 输出 | `schem` | Java 版 Sponge `.schem` 结构文件（gzip NBT） |
 | 输出 | `mid` | MIDI（SMF）音乐文件 |
 | 输出 | `nbs` | OpenNoteBlockStudio NBS 音乐文件 |
 

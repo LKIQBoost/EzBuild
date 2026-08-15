@@ -218,6 +218,46 @@ def format_block_states(
 
 
 # ---------------------------------------------------------------------------
+# Java（Sponge .schem）↔ 模型（Bedrock 风格）的方块状态关键字段转换
+# ---------------------------------------------------------------------------
+# Java facing 方向名 -> Bedrock facing_direction 值
+JAVA_FACING_TO_BEDROCK = {
+    "down": 0, "up": 1, "north": 2, "south": 3, "west": 4, "east": 5,
+}
+_BEDROCK_TO_JAVA_FACING = {v: k for k, v in JAVA_FACING_TO_BEDROCK.items()}
+
+
+def java_to_bedrock_states(states: dict[str, Any]) -> dict[str, Any]:
+    """Java 方块状态 → 模型（Bedrock 风格）。
+
+    转换命令方块等关键状态：``facing=north`` → ``facing_direction=2``，
+    ``conditional=true`` → ``conditional_bit=1``；其余状态原样保留。
+    """
+    out: dict[str, Any] = {}
+    for key, val in states.items():
+        if key == "facing" and val in JAVA_FACING_TO_BEDROCK:
+            out["facing_direction"] = JAVA_FACING_TO_BEDROCK[val]
+        elif key == "conditional":
+            out["conditional_bit"] = 1 if val else 0
+        else:
+            out[key] = val
+    return out
+
+
+def bedrock_to_java_states(states: dict[str, Any]) -> dict[str, Any]:
+    """模型（Bedrock 风格）→ Java 方块状态（反向）。"""
+    out: dict[str, Any] = {}
+    for key, val in states.items():
+        if key == "facing_direction" and isinstance(val, int) and val in _BEDROCK_TO_JAVA_FACING:
+            out["facing"] = _BEDROCK_TO_JAVA_FACING[val]
+        elif key == "conditional_bit":
+            out["conditional"] = bool(val)
+        else:
+            out[key] = val
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 方块状态字符串解析（SNBT 风格，兼容 {} 与 [] 外壳、= 与 : 分隔）
 # ---------------------------------------------------------------------------
 def parse_block_states_string(s: str) -> dict[str, Any]:
