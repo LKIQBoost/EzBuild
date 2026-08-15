@@ -66,10 +66,14 @@ class TestCommandBlockJsonWriter:
         assert len(data) == 3
 
 
-class TestSetblockTxtWriter:
+class TestPlainSetblock:
+    """render_plain_setblock（原 setblock_txt）：朴素 setblock，不分区块不合并。"""
+
     def test_render(self):
+        from ezbuild.writers.txt import render_plain_setblock
+
         building = _mc_building()
-        text = ezbuild.registry.get_writer("setblock_txt")().render(building)
+        text = render_plain_setblock(building)
         lines = text.splitlines()
         assert len(lines) == 5
         assert lines[0] == "setblock ~0 ~0 ~0 command_block"
@@ -77,10 +81,12 @@ class TestSetblockTxtWriter:
         assert 'setblock ~1 ~1 ~0 chain_command_block ["conditional_bit"=true]' in lines
 
 
-def test_bdx_setblock_txt_includes_command_blocks():
-    """回归：BDX 的命令方块也要出现在 setblock_txt 中（之前丢失导致输出为空）。"""
+def test_bdx_plain_setblock_includes_command_blocks():
+    """回归：BDX 的命令方块也要出现在 setblock 输出中（之前丢失导致输出为空）。"""
+    from ezbuild.writers.txt import render_plain_setblock
+
     building = ezbuild.convert_read_from(make_bdx_bytes(), "bdx")
-    text = ezbuild.registry.get_writer("setblock_txt")().render(building)
+    text = render_plain_setblock(building)
     lines = text.splitlines()
     # 1 个 stone + 2 个命令方块
     assert len(lines) == 3
@@ -131,6 +137,22 @@ class TestTxtWriter:
         # 输出中不应出现超出区块范围的绝对坐标（都是 ~ 相对）
         assert all(l.startswith(("tp", "fill", "setblock")) for l in lines)
 
+    def test_nofill_disables_fill_merge(self):
+        """fill_merge=False（--nofill）：分区块保留，但全部输出 setblock。"""
+        from ezbuild.writers.txt import chunk_optimize
+
+        blocks = {}
+        for x in range(20):
+            for y in range(3):
+                for z in range(20):
+                    blocks[(x, y, z)] = ("stone", "")
+        text = chunk_optimize(blocks, chunk_size=16, fill_merge=False)
+        lines = text.splitlines()
+        assert not any(l.startswith("fill") for l in lines)
+        # 20×3×20 = 1200 个 setblock，4 个区块
+        assert sum(1 for l in lines if l.startswith("setblock")) == 1200
+        assert sum(1 for l in lines if l.startswith("tp")) == 4
+
 
 class TestStripStates:
     """setblock 输出默认省略所有 *_bit 开关状态（conditional_bit 保留）。"""
@@ -145,7 +167,9 @@ class TestStripStates:
         return b
 
     def test_default_strips_all_bit_states(self):
-        text = ezbuild.registry.get_writer("setblock_txt")().render(self._building())
+        from ezbuild.writers.txt import render_plain_setblock
+
+        text = render_plain_setblock(self._building())
         assert 'barrel ["facing_direction"=3]' in text
         assert 'hopper ["facing_direction"=0]' in text
         assert 'stone []' in text or "setblock ~2 ~0 ~0 stone" in text
@@ -153,9 +177,9 @@ class TestStripStates:
         assert "powered_bit" not in text and "attached_bit" not in text
 
     def test_all_states_kept(self):
-        from ezbuild.writers.setblock_txt import SetblockTxtWriter
+        from ezbuild.writers.txt import render_plain_setblock
 
-        text = SetblockTxtWriter(strip_states=frozenset()).render(self._building())
+        text = render_plain_setblock(self._building(), strip_states=frozenset())
         assert 'barrel ["facing_direction"=3,"open_bit"=0]' in text
         assert 'hopper ["facing_direction"=0,"toggle_bit"=0]' in text
         assert '["powered_bit"=1,"attached_bit"=0]' in text
@@ -163,10 +187,11 @@ class TestStripStates:
     def test_conditional_bit_not_stripped(self):
         """conditional_bit（命令方块）是语义状态，不能被剥离。"""
         from ezbuild.model import Block, Building
+        from ezbuild.writers.txt import render_plain_setblock
 
         b = Building()
         b.blocks.append(Block(0, 0, 0, "chain_command_block", {"conditional_bit": 1}))
-        text = ezbuild.registry.get_writer("setblock_txt")().render(b)
+        text = render_plain_setblock(b)
         assert '["conditional_bit"=true]' in text
 
 

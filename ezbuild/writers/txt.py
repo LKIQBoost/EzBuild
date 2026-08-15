@@ -20,7 +20,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..model import Building
+from typing import Any
+
+from ..model import Block, Building
 from ..utils import format_block_states
 from .base import Writer
 
@@ -28,20 +30,49 @@ from .base import Writer
 MAX_FILL_BLOCKS = 32367
 
 
+def render_plain_setblock(
+    building: Building, strip_states: frozenset[str] | None = None
+) -> str:
+    """渲染纯 setblock 文本（不分区块、不合并 fill）。
+
+    供 IBI 打包等需要朴素 setblock 列表的场景使用。
+    ``strip_states``: None = 默认规则（省略 *_bit 开关状态）。
+    """
+    lines = []
+    for block in building.blocks:
+        coord = f"~{block.x} ~{block.y} ~{block.z}"
+        states = block.states
+        if isinstance(states, str):
+            states_str = states.strip().strip("{}").strip()
+            if states_str:
+                lines.append(f"setblock {coord} {block.name} [{states_str}]")
+            else:
+                lines.append(f"setblock {coord} {block.name}")
+        elif states:
+            lines.append(
+                f"setblock {coord} {block.name} [{format_block_states(states, strip_states)}]"
+            )
+        else:
+            lines.append(f"setblock {coord} {block.name}")
+    return "\n".join(lines)
+
+
 class TxtWriter(Writer):
     format_name = "txt"
     extensions = (".txt",)
-    description = "分区块优化 txt（fill 三维合并 + 区块化 + tp 导航）"
+    description = "分区块优化 txt（区块化 + tp 导航，可选 fill 三维合并）"
 
     def __init__(
         self,
         chunk_size: int = 16,
         insert_count: int = 0,
         strip_states: frozenset[str] | None = None,
+        fill_merge: bool = True,
     ):
         self.chunk_size = chunk_size
         self.insert_count = insert_count  # 每个 tp 后额外插入的命令数（如 testfor @s）
         self.strip_states = strip_states
+        self.fill_merge = fill_merge  # False = 不进行三维 fill 合并（--nofill）
 
     def render(self, building: Building) -> str:
         blocks: dict[tuple[int, int, int], tuple[str, str]] = {}
@@ -53,7 +84,9 @@ class TxtWriter(Writer):
                 else format_block_states(states, self.strip_states)
             )
             blocks[(blk.x, blk.y, blk.z)] = (blk.name, state_str)
-        return chunk_optimize(blocks, self.chunk_size, self.insert_count)
+        return chunk_optimize(
+            blocks, self.chunk_size, self.insert_count, self.fill_merge
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -63,10 +96,12 @@ def chunk_optimize(
     blocks: dict[tuple[int, int, int], tuple[str, str]],
     chunk_size: int = 16,
     insert_count: int = 0,
+    fill_merge: bool = True,
 ) -> str:
-    """对方块字典做分区块三维优化，返回指令文本。
+    """对方块字典做分区块优化，返回指令文本。
 
     ``blocks``: {(x, y, z): (方块名, 状态字符串)}
+    ``fill_merge``: False 时不进行三维 fill 合并（输出纯 setblock）。
     """
     if not blocks:
         return ""
@@ -91,7 +126,7 @@ def chunk_optimize(
             out.extend(["testfor @s"] * insert_count)
         prev_x, prev_z = sx, sz
 
-        fill_cmds, setblock_cmds = _optimize_region(region)
+        fill_cmds, setblock_cmds = _optimize_region(region, fill_merge)
         out.extend(sorted(fill_cmds + setblock_cmds, key=_y_sort_key))
 
     return "\n".join(out)
@@ -182,8 +217,20 @@ def _split_fill(start, end, name: str, states: str) -> list[str]:
     return cmds
 
 
-def _optimize_region(blocks) -> tuple[list[str], list[str]]:
-    """把一个区块内的方块合并为 fill / setblock 命令。"""
+def _optimize_region(blocks, fill_merge: bool = True) -> tuple[list[str], list[str]]:
+    """把一个区块内的方块合并为 fill / setblock 命令。
+
+    ``fill_merge`` 为 False 时不做三维合并，全部输出 setblock。
+    """
+    if not fill_merge:
+        cmds = []
+        for (x, y, z), (name, states) in blocks.items():
+            cmd = f"setblock ~{x} ~{y} ~{z} {name}"
+            if states:
+                cmd += f" [{states}]"
+            cmds.append(cmd)
+        return [], cmds
+
     fill_cmds: list[str] = []
     setblock_cmds: list[str] = []
     visited: set[tuple[int, int, int]] = set()

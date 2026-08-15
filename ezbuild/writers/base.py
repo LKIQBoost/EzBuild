@@ -19,7 +19,7 @@ from ..model import Building
 
 
 class Writer(abc.ABC):
-    #: 格式唯一名，如 "cmd_json" / "setblock_txt" / "ibi"
+    #: 格式唯一名，如 "cmd_json" / "txt" / "ibi"
     format_name: str = ""
     #: 输出文件扩展名，如 (".json",)，用于按输出文件扩展名自动推断格式
     extensions: tuple[str, ...] = ()

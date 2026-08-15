@@ -7,7 +7,7 @@
 
 fill 按参考脚本的 ``convert_fill_to_setblock`` 展开为逐方块。
 主要用于把未分区块的 txt 重新分区块（``main.py txt -i 未分区块.txt``），
-也可作为 txt → cmd_json / setblock_txt 等其它输出的入口。
+也可作为 txt → cmd_json / txt 等其它输出的入口。
 """
 
 from __future__ import annotations

@@ -12,9 +12,8 @@ Minecraft 建筑文件格式转换工具。把各种建筑文件（`.bdx`、`.mc
 ```bash
 # 第一个参数为输出格式（必填），-i 指定一个或多个输入文件；输出与输入同名同目录
 python main.py cmd_json -i 建筑.bdx
-python main.py setblock_txt -i 建筑.bdx 建筑2.mcstructure
 python main.py ibi -i 建筑.bdx
-python main.py txt -i 建筑.bdx
+python main.py txt -i 建筑.bdx 建筑2.mcstructure
 
 # -o 可选：指定单个输出文件
 python main.py cmd_json -i 建筑.bdx -o 命令方块.json
@@ -28,8 +27,11 @@ python main.py cmd_json -i 建筑.bdx --mapping block_runtime_ids.json
 # 把未分区块的 txt 分区块（txt → txt，输出自动加 _分区块 后缀避免覆盖）
 python main.py txt -i 未分区块.txt
 
+# txt 不进行三维 fill 合并（输出纯 setblock）
+python main.py txt -i 建筑.bdx --nofill
+
 # 保留全部方块状态（默认省略 *_bit 开关状态）
-python main.py setblock_txt -i 建筑.bdx --all-states
+python main.py txt -i 建筑.bdx --all-states
 ```
 
 > setblock/fill 输出默认省略所有 `*_bit` 开关状态（`open_bit`/`toggle_bit`/`powered_bit` 等），
@@ -54,8 +56,7 @@ ezbuild.convert_write(building, "命令方块.json", "cmd_json")  # 输出
 | 输入 | `schematic` | Java 版经典 `.schematic` 结构文件 |
 | 输入 | `txt` | `setblock`/`fill` 指令文本（未分区块） |
 | 输出 | `cmd_json` | 命令方块 JSON（`posx/posy/posz + BlockMode + Command + TickDelay + IsRedStoneMode + IsConditional`） |
-| 输出 | `setblock_txt` | `setblock` 指令文本（含方块状态） |
-| 输出 | `txt` | 分区块优化 txt：16×16 区块 + S 型排序 + fill 三维合并 + tp 导航 |
+| 输出 | `txt` | 分区块优化 txt：16×16 区块 + S 型排序 + tp 导航（默认 fill 三维合并，`--nofill` 关闭） |
 | 输出 | `ibi` | IBI 导入包（setblock 文本 + 命令方块 JSON，XOR 加密打包） |
 
 ## 项目结构
@@ -76,7 +77,6 @@ ezbuild/
 │   ├── writers/         # 输出渲染器（自动注册）
 │   │   ├── base.py      # Writer 抽象基类
 │   │   ├── cmd_json.py  # 命令方块 JSON（lemon 格式）
-│   │   ├── setblock_txt.py
 │   │   ├── txt.py       # 分区块优化 txt
 │   │   └── ibi.py
 │   └── data/            # 内置 Runtime ID 映射表
@@ -88,7 +88,7 @@ ezbuild/
 
 ```
 建筑文件 → Reader → Building（中立模型）→ Writer → 输出文件
-          (bdx/mcstructure)             (cmd_json/setblock_txt/ibi)
+          (bdx/mcstructure)             (cmd_json/txt/ibi)
 ```
 
 `Building` 是核心中间层：

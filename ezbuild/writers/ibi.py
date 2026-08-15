@@ -14,7 +14,7 @@ import random
 
 from ..model import Building, CommandBlock
 from .base import Writer
-from .setblock_txt import SetblockTxtWriter
+from .txt import render_plain_setblock
 
 
 class IbiWriter(Writer):
@@ -23,7 +23,7 @@ class IbiWriter(Writer):
     description = "IBI 导入包（setblock 文本 + 命令方块 JSON 加密打包）"
 
     def render(self, building: Building) -> bytes:
-        txt_bytes = SetblockTxtWriter().render(building).encode("utf-8")
+        txt_bytes = render_plain_setblock(building).encode("utf-8")
         json_bytes = json.dumps(
             self._json_content(building), ensure_ascii=False, indent=4
         ).encode("utf-8")

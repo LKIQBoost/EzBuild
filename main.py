@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import time
+import sys
 
 import pyfiglet
 
@@ -69,11 +70,17 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
             )
 
     print(f"[2/2] 输出格式 {to_format} -> {output}")
+    writer_cls = registry.get_writer(to_format)
+    kwargs = {}
     if args.all_states:
-        # 保留全部方块状态（不省略 open_bit/toggle_bit 等）
-        writer_cls = registry.get_writer(to_format)
+        # 保留全部方块状态（不省略 *_bit 开关状态）
+        kwargs["strip_states"] = frozenset()
+    if args.nofill:
+        # 不进行三维 fill 合并（txt 格式）
+        kwargs["fill_merge"] = False
+    if kwargs:
         try:
-            writer = writer_cls(strip_states=frozenset())
+            writer = writer_cls(**kwargs)
         except TypeError:  # 不支持的 writer（如 cmd_json）直接默认构造
             writer = writer_cls()
         writer.write(building, output)
@@ -140,7 +147,7 @@ def main(argv=None) -> int:
         "format",
         nargs="?",
         metavar="输出格式",
-        help="输出格式：cmd_json / setblock_txt / ibi（必填）",
+        help="输出格式：cmd_json / txt / ibi（必填）",
     )
     parser.add_argument(
         "-i",
@@ -169,7 +176,12 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--all-states",
         action="store_true",
-        help="保留全部方块状态（默认省略 open_bit/toggle_bit 等纯开关状态）",
+        help="保留全部方块状态（默认省略 *_bit 开关状态）",
+    )
+    parser.add_argument(
+        "--nofill",
+        action="store_true",
+        help="txt 格式不进行三维 fill 合并（输出纯 setblock）",
     )
 
     args = parser.parse_args(argv)
