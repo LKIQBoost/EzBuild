@@ -32,8 +32,8 @@ def cmd_list(_args) -> int:
     return 0
 
 
-def _read_building(src: str, mapping_file: str | None) -> ezbuild.Building:
-    """读取一个建筑文件；--mapping 仅对 bdx 生效。"""
+def _read_building(src: str, mapping_file: str | None) -> ezbuild.Building | ezbuild.Song:
+    """读取一个建筑或音乐文件；--mapping 仅对 bdx 生效。"""
     if mapping_file and registry.format_for_path(src) == "bdx":
         from ezbuild.readers.bdx import BDXReader
 
@@ -47,13 +47,24 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
     if not Path(src).is_file():
         raise FileNotFoundError(f"输入文件不存在: {src}")
 
-    print(f"[1/2] 读取建筑: {src}")
+    print(f"[1/2] 读取: {src}")
     building = _read_building(src, args.mapping)
-    print(
-        f"      方块 {building.block_count} 个，命令方块 {building.command_block_count} 个"
-    )
-
     to_format = args.format  # 第一个位置参数（输出格式，必填）
+    if isinstance(building, ezbuild.Song) and to_format not in ezbuild.MUSIC_FORMATS:
+        # 音乐 → 建筑：先转成命令方块音乐机
+        building = ezbuild.song_to_building(building, edition=args.edition)
+    if isinstance(building, ezbuild.Song):
+        n = len(building.notes)
+        if n:
+            duration = max(note.time for note in building.notes)
+            print(f"      音符 {n} 个，层 {len(building.layers)} 个，时长 {duration:.2f}s")
+        else:
+            print("      空歌曲")
+    else:
+        print(
+            f"      方块 {building.block_count} 个，命令方块 {building.command_block_count} 个"
+        )
+
     if args.output is not None:
         if len(args.input) > 1:
             raise ValueError("-o/--output 仅支持单个输入文件")
@@ -78,6 +89,9 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
     if args.nofill:
         # 不进行三维 fill 合并（txt 格式）
         kwargs["fill_merge"] = False
+    if args.raw_range:
+        # NBS 输出不折叠音高（保留原始音高）
+        kwargs["fold_range"] = False
     if kwargs:
         try:
             writer = writer_cls(**kwargs)
@@ -182,6 +196,17 @@ def main(argv=None) -> int:
         "--nofill",
         action="store_true",
         help="txt 格式不进行三维 fill 合并（输出纯 setblock）",
+    )
+    parser.add_argument(
+        "--raw-range",
+        action="store_true",
+        help="NBS 输出保留原始音高，不做可播放范围(33-57)八度折叠",
+    )
+    parser.add_argument(
+        "--edition",
+        choices=("bedrock", "java"),
+        default="bedrock",
+        help="音乐转建筑时 /playsound 命令的版本语法（默认 bedrock）",
     )
 
     args = parser.parse_args(argv)
