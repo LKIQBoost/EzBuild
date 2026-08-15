@@ -114,7 +114,7 @@ class MCStructureReader(Reader):
             command=command,
             custom_name=str(entity.get("CustomName", "") or ""),
             tick_delay=int(entity.get("TickDelay", 0) or 0),
-            conditional=bool(entity.get("Conditional", False)),
+            conditional=bool(entity.get("conditionalMode", entity.get("Conditional", False))),
             needs_redstone=not auto,
             execute_on_first_tick=bool(entity.get("ExecuteOnFirstTick", False)),
             track_output=bool(entity.get("TrackOutput", True)),

@@ -28,7 +28,14 @@ from .music_builder import song_to_building
 
 # 触发 readers / writers 子模块自动注册
 from . import readers, writers  # noqa: E402,F401
-from .streaming import schem_to_txt  # noqa: E402
+from .streaming import (  # noqa: E402
+    schem_to_txt,
+    schematic_to_cmd_json,
+    schematic_to_ibi,
+    schematic_to_mcstructure,
+    schematic_to_schem,
+    schematic_to_txt,
+)
 
 __version__ = "0.4.0"
 
@@ -45,6 +52,11 @@ __all__ = [
     "Layer",
     "song_to_building",
     "schem_to_txt",
+    "schematic_to_txt",
+    "schematic_to_ibi",
+    "schematic_to_mcstructure",
+    "schematic_to_schem",
+    "schematic_to_cmd_json",
     "convert_read",
     "convert_write",
     "auto_convert",

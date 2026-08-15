@@ -26,6 +26,18 @@ def _make_building() -> Building:
     return b
 
 
+def _same_content(a: Building, b: Building) -> bool:
+    """比较两座建筑的内容（方块/命令方块按位置与值，忽略调色板顺序）。"""
+    def blockset(bl):
+        return {(x.x, x.y, x.z): (x.name, tuple(sorted(x.states.items()))) for x in bl.blocks}
+
+    def cbset(bl):
+        return {(c.x, c.y, c.z): (c.mode, c.command, c.conditional, c.needs_redstone)
+                for c in bl.command_blocks}
+
+    return blockset(a) == blockset(b) and cbset(a) == cbset(b)
+
+
 class TestBlockstateParsing:
     def test_plain(self):
         assert _parse_blockstate("minecraft:stone") == ("stone", {})
@@ -158,3 +170,67 @@ class TestStreaming:
         schem_to_txt(data, out)
         text = out.read_text(encoding="utf-8")
         assert "setblock" in text or "fill" in text
+
+    def test_classic_schematic_streaming(self, tmp_path):
+        """经典 .schematic 也走流式，输出与非流式一致。"""
+        from .fixtures import make_schematic_bytes
+        from ezbuild.streaming import schematic_to_txt
+
+        b = ezbuild.convert_read_from(make_schematic_bytes(), "schematic")
+        non_stream = ezbuild.registry.get_writer("txt")().render(b)
+        out = tmp_path / "c.txt"
+        schematic_to_txt(make_schematic_bytes(), out)
+        assert out.read_text(encoding="utf-8") == non_stream
+
+    def test_streaming_cmd_json(self, tmp_path):
+        from ezbuild.streaming import schematic_to_cmd_json
+
+        data = ezbuild.registry.get_writer("schem")().render(_make_building())
+        building = ezbuild.convert_read_from(data, "schem")
+        non = ezbuild.registry.get_writer("cmd_json")().render(building)
+        out = tmp_path / "c.json"
+        schematic_to_cmd_json(data, out)
+        assert out.read_text(encoding="utf-8") == non
+
+    def test_streaming_ibi_content(self, tmp_path):
+        """流式 ibi 解码内容与非流式一致（setblock 行集合 + JSON 段；
+        行顺序可能不同，位置显式）。"""
+        from ezbuild.streaming import schematic_to_ibi
+        from ezbuild.writers.ibi import decode_ibi
+
+        data = ezbuild.registry.get_writer("schem")().render(_make_building())
+        building = ezbuild.convert_read_from(data, "schem")
+        non = ezbuild.registry.get_writer("ibi")().render(building)
+        out = tmp_path / "c.ibi"
+        schematic_to_ibi(data, out)
+        stream = open(out, "rb").read()
+        txt_a, json_a = decode_ibi(non)
+        txt_b, json_b = decode_ibi(stream)
+        assert sorted(txt_a.splitlines()) == sorted(txt_b.splitlines())
+        assert json_a == json_b
+
+    def test_streaming_mcstructure_content(self, tmp_path):
+        """流式 mcstructure 读回内容与非流式一致。"""
+        from ezbuild.streaming import schematic_to_mcstructure
+
+        data = ezbuild.registry.get_writer("schem")().render(_make_building())
+        building = ezbuild.convert_read_from(data, "schem")
+        non = ezbuild.convert_read_from(
+            ezbuild.registry.get_writer("mcstructure")().render(building), "mcstructure")
+        out = tmp_path / "c.mcstructure"
+        schematic_to_mcstructure(data, out)
+        stream = ezbuild.convert_read(out)
+        assert _same_content(stream, non)
+
+    def test_streaming_schem_content(self, tmp_path):
+        """流式 schem 读回内容与非流式一致。"""
+        from ezbuild.streaming import schematic_to_schem
+
+        data = ezbuild.registry.get_writer("schem")().render(_make_building())
+        building = ezbuild.convert_read_from(data, "schem")
+        non = ezbuild.convert_read_from(
+            ezbuild.registry.get_writer("schem")().render(building), "schem")
+        out = tmp_path / "c.schem"
+        schematic_to_schem(data, out)
+        stream = ezbuild.convert_read(out)
+        assert _same_content(stream, non)

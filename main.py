@@ -65,22 +65,40 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
 
     to_format = args.format  # 第一个位置参数（输出格式，必填）
 
-    # schem -> txt：流式增量转换，避免巨型 schem 载入整座建筑占满内存
-    if registry.format_for_path(src) == "schem" and to_format == "txt":
-        from ezbuild.streaming import schem_to_txt
-
-        output = _output_path(src, to_format, args)
-        print(f"[1/2] 流式转换: {src}")
-        schem_to_txt(
-            src, output,
-            fill_merge=not args.nofill,
-            strip_states=frozenset() if args.all_states else None,
-            progress=True,
+    # schem / schematic -> 建筑格式：流式增量转换，避免巨型结构载入整座建筑占满内存
+    src_fmt = registry.format_for_path(src)
+    if src_fmt in ("schem", "schematic"):
+        from ezbuild.streaming import (
+            schematic_to_cmd_json,
+            schematic_to_ibi,
+            schematic_to_mcstructure,
+            schematic_to_schem,
+            schematic_to_txt,
         )
-        elapsed = time.monotonic() - start
-        print(f"[2/2] 输出格式 txt -> {output}")
-        print(f"      转换完成 ✓（耗时 {_fmt_duration(elapsed)}）")
-        return output, to_format
+
+        _STREAMING = {
+            "txt": (schematic_to_txt, {"fill_merge": True, "strip_states": None}),
+            "ibi": (schematic_to_ibi, {"strip_states": None}),
+            "mcstructure": (schematic_to_mcstructure, {}),
+            "schem": (schematic_to_schem, {}),
+            "cmd_json": (schematic_to_cmd_json, {}),
+        }
+        if to_format in _STREAMING:
+            fn, kwargs = _STREAMING[to_format]
+            kwargs = dict(kwargs)
+            kwargs["progress"] = True
+            if "fill_merge" in kwargs:
+                kwargs["fill_merge"] = not args.nofill
+            if "strip_states" in kwargs:
+                kwargs["strip_states"] = frozenset() if args.all_states else None
+
+            output = _output_path(src, to_format, args)
+            print(f"[1/2] 流式转换: {src}")
+            fn(src, output, **kwargs)
+            elapsed = time.monotonic() - start
+            print(f"[2/2] 输出格式 {to_format} -> {output}")
+            print(f"      转换完成 ✓（耗时 {_fmt_duration(elapsed)}）")
+            return output, to_format
 
     print(f"[1/2] 读取: {src}")
     building = _read_building(src, args.mapping)

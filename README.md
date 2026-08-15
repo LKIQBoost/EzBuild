@@ -55,9 +55,13 @@ python main.py mcstructure -i 歌曲.mid --edition java
 python main.py mcstructure -i 建筑.schem
 python main.py schem -i 建筑.bdx
 
-# schem → txt 自动走**流式增量转换**（按 16×16 区块列逐块读写，
-# 千万级方块的巨型 schem 也不会占满内存）
+# schem/schematic → 所有建筑格式自动走**流式增量转换**（不建整座建筑模型，
+# 千万级方块的巨型结构也不会占满内存；命令方块/调色板等照常保留）
 python main.py txt -i 巨型建筑.schem
+python main.py ibi -i 巨型建筑.schematic
+python main.py mcstructure -i 巨型建筑.schem
+python main.py schem -i 巨型建筑.schem
+python main.py cmd_json -i 巨型建筑.schematic
 ```
 
 > setblock/fill 输出默认省略所有 `*_bit` 开关状态（`open_bit`/`toggle_bit`/`powered_bit` 等），
