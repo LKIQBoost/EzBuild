@@ -1,0 +1,1 @@
+uv run python -m nuitka --standalone --include-package=ezbuild --include-package-data=ezbuild --output-dir=build --output-filename=EzBuild.exe --lto=yes --assume-yes-for-downloads main.py
