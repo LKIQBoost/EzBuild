@@ -1,6 +1,7 @@
 """Reader 单元测试：把合成建筑文件解析为中立模型。"""
 
 import io
+import json
 
 import pytest
 
@@ -160,6 +161,37 @@ class TestTxtReader:
         assert lines[0].startswith("tp ")
         assert any(l.startswith("fill") for l in lines)  # red_wool 区域合并成 fill
         assert any("red_wool" in l for l in lines)
+
+
+class TestIbiReader:
+    """IBI 导入包 → Building（拆分 txt 段 + 命令方块 JSON 段）。"""
+
+    def _pack(self):
+        """用 bdx 样例打包一个 IBI 字节。"""
+        building = ezbuild.convert_read_from(make_bdx_bytes(), "bdx")
+        return ezbuild.registry.get_writer("ibi")().render(building)
+
+    def test_roundtrip(self):
+        building = ezbuild.convert_read_from(self._pack(), "ibi")
+        assert building.source_format == "ibi"
+        # txt 段：1 stone + 2 命令方块外壳
+        assert building.block_count == 3
+        # JSON 段：2 个命令方块
+        assert building.command_block_count == 2
+        cbs = sorted(building.command_blocks, key=lambda cb: cb.x)
+        assert cbs[0].command == "say impulse"
+        assert cbs[0].mode == MODE_IMPULSE
+        assert cbs[1].command == "say chain"
+        assert cbs[1].mode == MODE_CHAIN
+        assert cbs[1].conditional is True
+
+    def test_to_cmd_json(self):
+        building = ezbuild.convert_read_from(self._pack(), "ibi")
+        entries = json.loads(
+            ezbuild.registry.get_writer("cmd_json")().render(building)
+        )
+        assert len(entries) == 2
+        assert entries[0]["Command"] == "say impulse"
 
 
 def test_unknown_format_raises():

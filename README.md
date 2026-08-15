@@ -30,6 +30,10 @@ python main.py txt -i 未分区块.txt
 # txt 不进行三维 fill 合并（输出纯 setblock）
 python main.py txt -i 建筑.bdx --nofill
 
+# 拆分 IBI：还原命令方块 JSON（lemon 格式）与 setblock txt
+python main.py cmd_json -i 建筑.ibi
+python main.py txt -i 建筑.ibi
+
 # 保留全部方块状态（默认省略 *_bit 开关状态）
 python main.py txt -i 建筑.bdx --all-states
 ```
@@ -55,6 +59,7 @@ ezbuild.convert_write(building, "命令方块.json", "cmd_json")  # 输出
 | 输入 | `mcstructure` | 基岩版 `.mcstructure` 结构文件 |
 | 输入 | `schematic` | Java 版经典 `.schematic` 结构文件 |
 | 输入 | `txt` | `setblock`/`fill` 指令文本（未分区块） |
+| 输入 | `ibi` | IBI 导入包（setblock 文本 + 命令方块 JSON，XOR 加密） |
 | 输出 | `cmd_json` | 命令方块 JSON（`posx/posy/posz + BlockMode + Command + TickDelay + IsRedStoneMode + IsConditional`） |
 | 输出 | `txt` | 分区块优化 txt：16×16 区块 + S 型排序 + tp 导航（默认 fill 三维合并，`--nofill` 关闭） |
 | 输出 | `ibi` | IBI 导入包（setblock 文本 + 命令方块 JSON，XOR 加密打包） |
@@ -73,7 +78,8 @@ ezbuild/
 │   │   ├── mcstructure.py
 │   │   ├── bdx.py
 │   │   ├── schematic.py
-│   │   └── txt.py
+│   │   ├── txt.py
+│   │   └── ibi.py
 │   ├── writers/         # 输出渲染器（自动注册）
 │   │   ├── base.py      # Writer 抽象基类
 │   │   ├── cmd_json.py  # 命令方块 JSON（lemon 格式）
