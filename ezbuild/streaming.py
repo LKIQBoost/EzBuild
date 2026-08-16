@@ -31,6 +31,16 @@ from .writers.txt import _divide_chunks, _optimize_region, _s_sort, _y_sort_key
 
 Output = Union[str, "os.PathLike", "io.TextIOBase"]
 
+# 进度条用 tqdm.rich（rich 美化）；rich 是实验特性，过滤实验警告
+try:
+    import warnings
+
+    from tqdm import TqdmExperimentalWarning
+
+    warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
+except ImportError:  # pragma: no cover
+    pass
+
 
 # ---------------------------------------------------------------------------
 # 当前进程内存（MB）——跨平台，懒加载
@@ -293,7 +303,7 @@ def schematic_to_ibi(
         # 阶段 1：setblock 文本流式写入临时文件（避免列表累积）
         bar = None
         if progress:
-            from tqdm import tqdm
+            from tqdm.rich import tqdm
 
             counts = np.bincount(src.array3.ravel())
             total_blocks = int(src.array3.size - counts[src.air])
@@ -350,7 +360,7 @@ def schematic_to_ibi(
         fileobj = open(output, "wb") if close_out else output
         pack_bar = None
         if progress:
-            from tqdm import tqdm
+            from tqdm.rich import tqdm
 
             pack_bar = tqdm(total=txt_len + len(json_bytes), desc="打包加密", unit="B", unit_scale=True)
             _refresh_memory_postfix(pack_bar, peak)
@@ -398,7 +408,7 @@ def _iter_chunk_lines(
     bar = None
     try:
         if progress:
-            from tqdm import tqdm
+            from tqdm.rich import tqdm
 
             bar = tqdm(total=total_blocks, desc="转换方块", unit="个")
             _refresh_memory_postfix(bar, peak)

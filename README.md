@@ -213,4 +213,4 @@ python -m pytest tests/ -q
 
 - `nbtlib` — mcstructure / NBT 解析
 - `brotli` — BDX 解压
-- `tqdm` — 流式转换进度条
+- `tqdm` + `rich` — 流式转换进度条（`tqdm.rich` 美化）
