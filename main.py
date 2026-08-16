@@ -5,10 +5,11 @@ import argparse
 import time
 import sys
 
-import pyfiglet
+from pyfiglet import figlet_format
 
 import ezbuild
 from ezbuild import registry
+
 
 def _fmt_duration(seconds: float) -> str:
     """把秒数格式化为易读的耗时文本。"""
@@ -32,12 +33,8 @@ def cmd_list(_args) -> int:
     return 0
 
 
-def _read_building(src: str, mapping_file: str | None) -> ezbuild.Building | ezbuild.Song:
-    """读取一个建筑或音乐文件；--mapping 仅对 bdx 生效。"""
-    if mapping_file and registry.format_for_path(src) == "bdx":
-        from ezbuild.readers.bdx import BDXReader
-
-        return BDXReader(mapping_file=mapping_file).read(src)
+def _read_building(src: str) -> ezbuild.Building | ezbuild.Song:
+    """读取一个建筑或音乐文件（按扩展名自动识别）。"""
     return ezbuild.convert_read(src)
 
 
@@ -91,6 +88,8 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
                 kwargs["fill_merge"] = not args.nofill
             if "strip_states" in kwargs:
                 kwargs["strip_states"] = frozenset() if args.all_states else None
+            if to_format == "ibi":
+                kwargs["workers"] = args.threads  # -t 强制/指定并行进程数
 
             output = _output_path(src, to_format, args)
             print(f"[1/2] 流式转换: {src}")
@@ -101,15 +100,17 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
             return output, to_format
 
     print(f"[1/2] 读取: {src}")
-    building = _read_building(src, args.mapping)
+    building = _read_building(src)
     if isinstance(building, ezbuild.Song) and to_format not in ezbuild.MUSIC_FORMATS:
         # 音乐 → 建筑：先转成命令方块音乐机
-        building = ezbuild.song_to_building(building, edition=args.edition)
+        building = ezbuild.song_to_building(building)  # 固定基岩版 /playsound
     if isinstance(building, ezbuild.Song):
         n = len(building.notes)
         if n:
             duration = max(note.time for note in building.notes)
-            print(f"      音符 {n} 个，层 {len(building.layers)} 个，时长 {duration:.2f}s")
+            print(
+                f"      音符 {n} 个，层 {len(building.layers)} 个，时长 {duration:.2f}s"
+            )
         else:
             print("      空歌曲")
     else:
@@ -145,7 +146,7 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
 
 
 def gradient_ascii(text, start_color=(255, 0, 0), end_color=(0, 0, 255)):
-    ascii_art = pyfiglet.figlet_format(text, font="standard")
+    ascii_art = figlet_format(text, font="standard")
     lines = ascii_art.rstrip("\n").split("\n")
 
     max_width = max(len(line) for line in lines) if lines else 0
@@ -194,7 +195,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="ezbuild",
         description="Minecraft 建筑文件格式转换工具",
-        usage="%(prog)s <输出格式> -i <输入文件...> [-o 输出文件] [--mapping 映射表]",
+        usage="%(prog)s <输出格式> -i <输入文件...> [-o 输出文件]",
     )
     parser.add_argument(
         "format",
@@ -222,11 +223,6 @@ def main(argv=None) -> int:
         help="输出文件路径（仅单个输入文件时可用；默认与输入同名同目录）",
     )
     parser.add_argument(
-        "--mapping",
-        metavar="FILE",
-        help="BDX Runtime ID 映射表 JSON 路径",
-    )
-    parser.add_argument(
         "--all-states",
         action="store_true",
         help="保留全部方块状态（默认省略 *_bit 开关状态）",
@@ -242,10 +238,15 @@ def main(argv=None) -> int:
         help="NBS 输出保留原始音高，不做可播放范围(33-57)八度折叠",
     )
     parser.add_argument(
-        "--edition",
-        choices=("bedrock", "java"),
-        default="bedrock",
-        help="音乐转建筑时 /playsound 命令的版本语法（默认 bedrock）",
+        "-t",
+        "--threads",
+        nargs="?",
+        const=0,
+        type=int,
+        default=None,
+        metavar="N",
+        help="强制并行转换（-t 自动进程数，-t N 指定 N 个进程）；"
+             "默认大文件（非空气方块≥100万）自动并行，小文件单进程",
     )
 
     args = parser.parse_args(argv)

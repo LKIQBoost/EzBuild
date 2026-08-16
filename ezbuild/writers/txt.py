@@ -75,6 +75,9 @@ class TxtWriter(Writer):
         self.fill_merge = fill_merge  # False = 不进行三维 fill 合并（--nofill）
 
     def render(self, building: Building) -> str:
+        if not self.fill_merge:
+            # --nofill：纯 setblock，无 tp、无分块，绝对坐标
+            return render_plain_setblock(building, self.strip_states)
         blocks: dict[tuple[int, int, int], tuple[str, str]] = {}
         for blk in building.blocks:
             states = blk.states

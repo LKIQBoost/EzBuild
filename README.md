@@ -21,9 +21,6 @@ python main.py cmd_json -i 建筑.bdx -o 命令方块.json
 # 列出所有支持的格式
 python main.py -l
 
-# 自定义 BDX Runtime ID 映射表
-python main.py cmd_json -i 建筑.bdx --mapping block_runtime_ids.json
-
 # 把未分区块的 txt 分区块（txt → txt，输出自动加 _分区块 后缀避免覆盖）
 python main.py txt -i 未分区块.txt
 
@@ -44,12 +41,10 @@ python main.py mid -i 歌曲.nbs
 # NBS 输出保留原始音高（默认会把超范围音符八度折叠进音阶块可播放范围 33-57）
 python main.py nbs -i 歌曲.mid --raw-range
 
-# 音乐 → 建筑：转成"命令方块音乐机"（蛇形排列，红石触发播放整首歌）
+# 音乐 → 建筑：转成"命令方块音乐机"（蛇形排列，红石触发播放整首歌；固定基岩版 /playsound 语法）
 python main.py mcstructure -i 歌曲.mid   # .mcstructure 结构文件（可直接用结构方块导入）
 python main.py cmd_json -i 歌曲.mid      # 命令方块 JSON（lemon 格式）
 python main.py ibi -i 歌曲.mid           # IBI 导入包
-# Java 版 /playsound 语法
-python main.py mcstructure -i 歌曲.mid --edition java
 
 # Java Sponge .schem 结构文件读写
 python main.py mcstructure -i 建筑.schem
@@ -159,7 +154,7 @@ ezbuild/
 （红石触发启动），其余为连锁命令方块（auto）；每块写一条 `/execute ... playsound`，
 `TickDelay` 为距上一音符的游戏刻数（1 秒 = 20 刻），总时长 = 各块 TickDelay 累加。
 音高 `2**((note-66)/12)`（与 NBS key 45↔note 66 一致），鼓固定 pitch 1.0，
-超范围钳制 [0.5, 2.0]。可用 `--edition bedrock|java` 切换 /playsound 语法。
+超范围钳制 [0.5, 2.0]；/playsound 固定用基岩版语法。
 
 ## 扩展新格式
 

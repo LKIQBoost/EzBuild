@@ -15,8 +15,6 @@ import gzip
 import io
 import json
 import os
-import threading
-import time
 from typing import Callable, Iterator, Union
 
 import nbtlib
@@ -116,50 +114,20 @@ def _memory_mb() -> float | None:
         return None
 
 
-def _refresh_memory_postfix(bar, peak=None) -> None:
-    """在 tqdm 进度条右侧刷新内存占用。
+def _refresh_memory_postfix(bar) -> None:
+    """在进度条描述里刷新实时内存占用（当前 RSS）。
 
-    ``peak`` 为 ``_PeakMemory`` 时显示**峰值**（覆盖解析/构造阶段）；
-    否则显示当前 RSS。
+    ``tqdm.rich`` 不渲染 postfix（无槽位），改写到 desc（task.description）。
     """
-    if peak is not None:
-        p = peak.peak_mb()
-        if p:
-            bar.set_postfix_str(f"内存峰值 {p:.0f}MB")
-    else:
-        mem = _memory_mb()
-        if mem is not None:
-            bar.set_postfix_str(f"内存 {mem:.0f}MB")
-
-
-class _PeakMemory:
-    """后台线程采样当前进程 RSS 峰值（覆盖整段转换含解析构造）。"""
-
-    def __init__(self):
-        self._peak = 0.0
-        self._stop = False
-        self._thread = None
-
-    def __enter__(self):
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._stop = True
-        if self._thread is not None:
-            self._thread.join(timeout=0.2)
-        return False
-
-    def _run(self):
-        while not self._stop:
-            m = _memory_mb()
-            if m is not None:
-                self._peak = max(self._peak, m)
-            time.sleep(0.1)
-
-    def peak_mb(self) -> float:
-        return self._peak
+    cur = _memory_mb()
+    if cur is None:
+        return
+    base = getattr(bar, "_mem_base", None)
+    if base is None:
+        base = bar.desc or ""
+        bar._mem_base = base
+    bar.desc = f"{base} | 内存 {cur:.0f}MB"
+    bar.refresh()
 
 
 # ---------------------------------------------------------------------------
@@ -210,33 +178,57 @@ def iter_schematic_txt_lines(
     strip_states: frozenset | None = None,
     progress: bool = False,
 ) -> Iterator[str]:
-    """生成器：逐行产出 schem/schematic 的分区块 txt（内存 O(单区块)）。"""
-    peak = _PeakMemory() if progress else None
-    if peak is not None:
-        peak.__enter__()
-    try:
-        if isinstance(source, (bytes, bytearray)):
-            data = bytes(source)
-        else:
-            with open(source, "rb") as f:
-                data = f.read()
-        if data[:2] == b"\x1f\x8b":  # gzip 魔数
-            data = gzip.decompress(data)
-        schem = nbtlib.File.parse(io.BytesIO(data), byteorder="big")
+    """生成器：逐行产出 schem/schematic 的 txt。
 
-        if "Palette" in schem:
-            yield from _iter_sponge_lines(
-                schem, chunk_size=chunk_size, fill_merge=fill_merge,
-                strip_states=strip_states, progress=progress, peak=peak,
-            )
-        else:
-            yield from _iter_classic_lines(
-                schem, chunk_size=chunk_size, fill_merge=fill_merge,
-                strip_states=strip_states, progress=progress, peak=peak,
-            )
-    finally:
-        if peak is not None:
-            peak.__exit__(None, None, None)
+    ``fill_merge=True``：分区块（16×16 + tp 导航 + fill 合并）；
+    ``fill_merge=False``（--nofill）：**纯 setblock**，绝对坐标，无 tp、无分块。
+    """
+    if not fill_merge:
+        # --nofill：纯 setblock（无 tp、无分块）
+        src = SchematicSource(source, strip_states=strip_states)
+        bar = None
+        n = 0
+        if progress:
+            from tqdm.rich import tqdm
+
+            counts = np.bincount(src.array3.ravel())
+            bar = tqdm(total=int(src.array3.size - counts[src.air]),
+                       desc="生成 setblock", unit="个")
+            _refresh_memory_postfix(bar)
+        try:
+            for x, y, z, name, state_str in src.iter_all_blocks():
+                coord = f"~{x} ~{y} ~{z}"
+                yield (f"setblock {coord} {name} [{state_str}]" if state_str
+                       else f"setblock {coord} {name}")
+                if bar is not None:
+                    bar.update(1)
+                    n += 1
+                    if n % 10000 == 0:
+                        _refresh_memory_postfix(bar)
+        finally:
+            if bar is not None:
+                _refresh_memory_postfix(bar)
+                bar.close()
+        return
+    if isinstance(source, (bytes, bytearray)):
+        data = bytes(source)
+    else:
+        with open(source, "rb") as f:
+            data = f.read()
+    if data[:2] == b"\x1f\x8b":  # gzip 魔数
+        data = gzip.decompress(data)
+    schem = nbtlib.File.parse(io.BytesIO(data), byteorder="big")
+
+    if "Palette" in schem:
+        yield from _iter_sponge_lines(
+            schem, chunk_size=chunk_size, fill_merge=fill_merge,
+            strip_states=strip_states, progress=progress,
+        )
+    else:
+        yield from _iter_classic_lines(
+            schem, chunk_size=chunk_size, fill_merge=fill_merge,
+            strip_states=strip_states, progress=progress,
+        )
 
 
 # 向后兼容别名
@@ -276,12 +268,169 @@ def schematic_to_cmd_json(source: Source, output: Output, *, progress: bool = Fa
 # ---------------------------------------------------------------------------
 # 流式 ibi（setblock 文本段 + 命令方块 JSON 段，XOR 加密）
 # ---------------------------------------------------------------------------
+# 非空气方块数阈值：达到才自动启用共享内存多进程（小文件单进程零开销）
+PARALLEL_THRESHOLD = 1_000_000
+
+# 子进程全局（由 _init_worker 设置）
+_W_ENTRIES = None
+_W_AIR = None
+_W_OX = _W_OY = _W_OZ = 0
+_W_COUNTER = None
+
+
+def _count_non_air(src) -> int:
+    """非空气方块数（bincount，内存友好）。"""
+    counts = np.bincount(src.array3.ravel())
+    return int(src.array3.size - counts[src.air])
+
+
+def _parallel_worker_count(workers) -> int:
+    """确定进程数：指定 >0 用之；否则按 CPU 数（上限 8）。"""
+    if workers and workers > 0:
+        return workers
+    return max(2, min(os.cpu_count() or 2, 8))
+
+
+def _init_worker(entries, air, ox, oy, oz, counter):
+    global _W_ENTRIES, _W_AIR, _W_OX, _W_OY, _W_OZ, _W_COUNTER
+    _W_ENTRIES = entries
+    _W_AIR = air
+    _W_OX, _W_OY, _W_OZ = ox, oy, oz
+    _W_COUNTER = counter
+
+
+def _ibi_worker(args):
+    """子进程：生成 [y0,y1) 的 setblock 行到临时文件（每行带换行）。
+
+    从共享内存读 array3，不重新解析源；按块批量刷新共享进度计数。
+    """
+    shm_name, shape, dtype, y0, y1, tmp_path = args
+    from multiprocessing import shared_memory
+
+    shm = shared_memory.SharedMemory(name=shm_name)
+    try:
+        array3 = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+        n = 0
+        reported = 0
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for yy in range(y0, y1, 64):
+                col = array3[yy:min(yy + 64, y1), :, :]
+                mask = col != _W_AIR
+                ys, zs, xs = np.nonzero(mask)
+                vals = col[ys, zs, xs]
+                for y, z, x, v in zip(ys.tolist(), zs.tolist(), xs.tolist(), vals.tolist()):
+                    item = _W_ENTRIES.get(v)
+                    if item is None:
+                        continue
+                    f.write(f"setblock ~{x + _W_OX} ~{yy + y + _W_OY} ~{z + _W_OZ} {item[0]}")
+                    if item[1]:
+                        f.write(f" [{item[1]}]")
+                    f.write("\n")
+                    n += 1
+                    if n - reported >= 5000 and _W_COUNTER is not None:
+                        with _W_COUNTER.get_lock():
+                            _W_COUNTER.value += n - reported
+                        reported = n
+            if n > reported and _W_COUNTER is not None:
+                with _W_COUNTER.get_lock():
+                    _W_COUNTER.value += n - reported
+    finally:
+        shm.close()
+
+
+class _MultiFile:
+    """顺序读取多个文件的只读流（跨文件连续 read，供流式打包用）。"""
+
+    def __init__(self, files: list):
+        self._files = list(files)
+        self._idx = 0
+        self._cur = None
+
+    def read(self, n: int = -1) -> bytes:
+        if self._cur is None and self._idx < len(self._files):
+            self._cur = open(self._files[self._idx], "rb")
+        while self._cur is not None:
+            chunk = self._cur.read(n)
+            if chunk:
+                return chunk
+            self._cur.close()
+            self._idx += 1
+            if self._idx >= len(self._files):
+                self._cur = None
+                break
+            self._cur = open(self._files[self._idx], "rb")
+        return b""
+
+    def close(self):
+        if self._cur is not None:
+            self._cur.close()
+            self._cur = None
+
+
+def _generate_txt_parallel(src, entries, workers, progress) -> list:
+    """用共享内存多进程并行生成 setblock 临时文件，返回文件路径列表（按 y 序）。"""
+    import multiprocessing as mp
+    import tempfile
+    import time
+    from multiprocessing import shared_memory
+
+    shm = shared_memory.SharedMemory(create=True, size=src.array3.nbytes)
+    shm_arr = np.ndarray(src.array3.shape, dtype=src.array3.dtype, buffer=shm.buf)
+    shm_arr[:] = src.array3
+    counter = mp.Value("q", 0)
+
+    bounds = [src.H * i // workers for i in range(workers + 1)]
+    args_list = []
+    tmp_files = []
+    for i in range(workers):
+        y0, y1 = bounds[i], bounds[i + 1]
+        if y0 >= y1:
+            continue
+        tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
+        tmpf.close()
+        tmp_files.append(tmpf.name)
+        args_list.append((shm.name, src.array3.shape, src.array3.dtype, y0, y1, tmpf.name))
+
+    bar = None
+    if progress:
+        from tqdm.rich import tqdm
+
+        bar = tqdm(total=_count_non_air(src), desc="生成 setblock", unit="个")
+        _refresh_memory_postfix(bar)
+
+    pool = mp.Pool(workers, initializer=_init_worker,
+                   initargs=(entries, src.air, src.ox, src.oy, src.oz, counter))
+    try:
+        async_result = pool.map_async(_ibi_worker, args_list)
+        pool.close()
+        last = 0
+        while not async_result.ready():
+            done = counter.value
+            if done != last and bar is not None:
+                bar.update(done - last)
+                _refresh_memory_postfix(bar)
+                last = done
+            time.sleep(0.05)
+        async_result.get()  # 抛异常则冒泡
+        pool.join()
+        if bar is not None:
+            bar.update(counter.value - last)
+            _refresh_memory_postfix(bar)
+    finally:
+        if bar is not None:
+            bar.close()
+        shm.close()
+        shm.unlink()
+    return tmp_files
+
+
 def schematic_to_ibi(
     source: Source,
     output: Output,
     *,
     progress: bool = False,
     strip_states: frozenset | None = None,
+    workers: int | None = None,
 ) -> Output:
     """流式把 schem/schematic 写为 IBI 包（不建 Building 模型）。
 
@@ -294,13 +443,17 @@ def schematic_to_ibi(
 
     from .writers.ibi import encode_varint
 
-    peak = _PeakMemory() if progress else None
-    if peak is not None:
-        peak.__enter__()
-    try:
-        src = SchematicSource(source)  # 解析/构造在采样内（捕获内存峰值）
+    src = SchematicSource(source, strip_states=strip_states)
+    # 自动判断：workers 显式给（-t）→ 强制并行；否则非空气方块达阈值才并行
+    use_parallel = workers is not None or _count_non_air(src) >= PARALLEL_THRESHOLD
 
-        # 阶段 1：setblock 文本流式写入临时文件（避免列表累积）
+    # 阶段 1：setblock 文本流式写入临时文件（避免列表累积）
+    if use_parallel:
+        n_workers = _parallel_worker_count(workers)
+        worker_files = _generate_txt_parallel(src, src._entries, n_workers, progress)
+        txt_source = _MultiFile(worker_files)
+        tmp_files_to_clean = worker_files
+    else:
         bar = None
         if progress:
             from tqdm.rich import tqdm
@@ -308,15 +461,14 @@ def schematic_to_ibi(
             counts = np.bincount(src.array3.ravel())
             total_blocks = int(src.array3.size - counts[src.air])
             bar = tqdm(total=total_blocks, desc="生成 setblock", unit="个")
-            _refresh_memory_postfix(bar, peak)
+            _refresh_memory_postfix(bar)
 
         tmp = tempfile.TemporaryFile()
         tw = io.TextIOWrapper(tmp, encoding="utf-8")
         first = True
         n = 0
         try:
-            for x, y, z, name, states in src.iter_all_blocks():
-                state_str = format_block_states(states, strip_states) if states else ""
+            for x, y, z, name, state_str in src.iter_all_blocks():
                 coord = f"~{x} ~{y} ~{z}"
                 tw.write(
                     ("" if first else "\n")
@@ -328,66 +480,76 @@ def schematic_to_ibi(
                     bar.update(1)
                     n += 1
                     if n % 10000 == 0:  # 节流内存刷新，避免每方块渲染刷屏
-                        _refresh_memory_postfix(bar, peak)
+                        _refresh_memory_postfix(bar)
             tw.flush()
         finally:
             if bar is not None:
-                _refresh_memory_postfix(bar, peak)
+                _refresh_memory_postfix(bar)
                 bar.close()
+        txt_source = tmp
+        tmp_files_to_clean = None
 
-        # 阶段 2：命令方块 JSON（小）
-        json_content = [
-            {
-                "posX": f"~{cb.x}",
-                "posY": f"~{cb.y}",
-                "posZ": f"~{cb.z}",
-                "CommandMessage": base64.b64encode(cb.command.encode("utf-8")).decode("utf-8"),
-                "Commandtitle": base64.b64encode(str(i).encode("utf-8")).decode("utf-8"),
-                "mode": cb.mode,
-                "isTime": cb.tick_delay,
-                "Conditional": cb.conditional,
-                "isRedstone": cb.needs_redstone,
-            }
-            for i, cb in enumerate(src.command_blocks(), start=1)
-        ]
-        json_bytes = json.dumps(json_content, ensure_ascii=False, indent=4).encode("utf-8")
+    # 阶段 2：命令方块 JSON（小）
+    json_content = [
+        {
+            "posX": f"~{cb.x}",
+            "posY": f"~{cb.y}",
+            "posZ": f"~{cb.z}",
+            "CommandMessage": base64.b64encode(cb.command.encode("utf-8")).decode("utf-8"),
+            "Commandtitle": base64.b64encode(str(i).encode("utf-8")).decode("utf-8"),
+            "mode": cb.mode,
+            "isTime": cb.tick_delay,
+            "Conditional": cb.conditional,
+            "isRedstone": cb.needs_redstone,
+        }
+        for i, cb in enumerate(src.command_blocks(), start=1)
+    ]
+    json_bytes = json.dumps(json_content, ensure_ascii=False, indent=4).encode("utf-8")
 
-        # 阶段 3：打包加密（IBImport + 两段 XOR，快速 translate + 进度条）
+    # 阶段 3：打包加密（IBImport + 两段 XOR，快速 translate + 进度条）
+    if tmp_files_to_clean is not None:
+        txt_len = sum(os.path.getsize(f) for f in tmp_files_to_clean)
+    else:
         tmp.seek(0, 2)
         txt_len = tmp.tell()
         tmp.seek(0)
-        close_out = not hasattr(output, "write")
-        fileobj = open(output, "wb") if close_out else output
-        pack_bar = None
-        if progress:
-            from tqdm.rich import tqdm
+    close_out = not hasattr(output, "write")
+    fileobj = open(output, "wb") if close_out else output
+    pack_bar = None
+    if progress:
+        from tqdm.rich import tqdm
 
-            pack_bar = tqdm(total=txt_len + len(json_bytes), desc="打包加密", unit="B", unit_scale=True)
-            _refresh_memory_postfix(pack_bar, peak)
-        try:
-            fileobj.write(b"IBImport ")
-            for data, length in ((tmp, txt_len), (io.BytesIO(json_bytes), len(json_bytes))):
-                key = random.randint(1, 255)
-                table = bytes(i ^ key for i in range(256))  # 快速 XOR 映射表（C 速度）
-                fileobj.write(encode_varint(length))
-                fileobj.write(bytes([key]))
-                while True:
-                    chunk = data.read(1 << 20)
-                    if not chunk:
-                        break
-                    fileobj.write(chunk.translate(table))
-                    if pack_bar is not None:
-                        pack_bar.update(len(chunk))
-                        _refresh_memory_postfix(pack_bar, peak)
-        finally:
-            tmp.close()
-            if pack_bar is not None:
-                pack_bar.close()
-            if close_out:
-                fileobj.close()
+        pack_bar = tqdm(total=txt_len + len(json_bytes), desc="打包加密", unit="B", unit_scale=True)
+        _refresh_memory_postfix(pack_bar)
+    try:
+        fileobj.write(b"IBImport ")
+        for data, length in ((txt_source, txt_len), (io.BytesIO(json_bytes), len(json_bytes))):
+            key = random.randint(1, 255)
+            table = bytes(i ^ key for i in range(256))  # 快速 XOR 映射表（C 速度）
+            fileobj.write(encode_varint(length))
+            fileobj.write(bytes([key]))
+            while True:
+                chunk = data.read(1 << 20)
+                if not chunk:
+                    break
+                fileobj.write(chunk.translate(table))
+                if pack_bar is not None:
+                    pack_bar.update(len(chunk))
+                    _refresh_memory_postfix(pack_bar)
     finally:
-        if peak is not None:
-            peak.__exit__(None, None, None)
+        if tmp_files_to_clean is not None:
+            txt_source.close()
+            for f in tmp_files_to_clean:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        else:
+            tmp.close()
+        if pack_bar is not None:
+            pack_bar.close()
+        if close_out:
+            fileobj.close()
     return output
 
 
@@ -402,7 +564,6 @@ def _iter_chunk_lines(
     progress: bool,
     total_blocks: int,
     get_region: Callable,
-    peak=None,
 ) -> Iterator[str]:
     """按 S 序遍历区块，逐行产出 tp 与 fill/setblock 命令。"""
     bar = None
@@ -411,7 +572,7 @@ def _iter_chunk_lines(
             from tqdm.rich import tqdm
 
             bar = tqdm(total=total_blocks, desc="转换方块", unit="个")
-            _refresh_memory_postfix(bar, peak)
+            _refresh_memory_postfix(bar)
 
         prev_x = prev_z = 0
         for sx, ex, sz, ez in _s_sort(chunks, chunk_size):
@@ -420,7 +581,7 @@ def _iter_chunk_lines(
                 continue
             if bar is not None:
                 bar.update(len(region))
-                _refresh_memory_postfix(bar, peak)
+                _refresh_memory_postfix(bar)
             rel_x, rel_z = sx - prev_x, sz - prev_z
             yield f"tp ~{rel_x} ~ ~{rel_z}"
             prev_x, prev_z = sx, sz
@@ -442,13 +603,17 @@ def _iter_sponge_lines(
     fill_merge: bool,
     strip_states: frozenset | None,
     progress: bool,
-    peak=None,
 ) -> Iterator[str]:
     W, H, L = int(schem["Width"]), int(schem["Height"]), int(schem["Length"])
     ox, oy, oz = (int(v) for v in schem.get("Offset", [0, 0, 0]))
     parsed = {
         int(idx): _parse_blockstate(blockstate)
         for blockstate, idx in schem["Palette"].items()
+    }
+    # 预计算：索引 -> (name, 格式化状态串)，迭代时零函数调用
+    parsed_str = {
+        idx: (name, format_block_states(states, strip_states) if states else "")
+        for idx, (name, states) in parsed.items()
     }
     air = next((i for i, (n, _) in parsed.items() if not n or n == "air"), None)
 
@@ -493,17 +658,15 @@ def _iter_sponge_lines(
         vals = col[ys, zs, xs]
         region = {}
         for y, zl, xl, v in zip(ys.tolist(), zs.tolist(), xs.tolist(), vals.tolist()):
-            item = parsed.get(v)
+            item = parsed_str.get(v)
             if item is None:
                 continue
-            name, states = item
-            region[(xl, y + oy, zl)] = (
-                name, format_block_states(states, strip_states) if states else "",
-            )
+            name, state_str = item
+            region[(xl, y + oy, zl)] = (name, state_str)
         return region
 
     yield from _iter_chunk_lines(
-        chunks, chunk_size, fill_merge, strip_states, progress, total_blocks, get_region, peak
+        chunks, chunk_size, fill_merge, strip_states, progress, total_blocks, get_region
     )
 
 
@@ -516,12 +679,12 @@ class SchematicSource:
     - ``array3``: ``(H, L, W)`` 数组 —— Sponge 存调色板索引(uint8)，经典存
       ``id*16+data`` 组合键(uint16)。
     - ``parsed``: ``{索引: (方块名, 状态)}``。
-    - ``iter_blocks`` / ``iter_all_blocks``: 产出 ``(绝对x, y, 绝对z, name, states)``。
+    - ``iter_blocks`` / ``iter_all_blocks``: 产出 ``(绝对x, y, 绝对z, name, 格式化状态串)``。
     - ``command_blocks``: 从 BlockEntities / TileEntities 产出 CommandBlock。
     内存 = 方块数组 + 调色板，与方块数无关。
     """
 
-    def __init__(self, source: Source):
+    def __init__(self, source: Source, strip_states: frozenset | None = None):
         if isinstance(source, (bytes, bytearray)):
             data = bytes(source)
         else:
@@ -534,6 +697,11 @@ class SchematicSource:
             self._init_sponge(root)
         else:
             self._init_classic(root)
+        # 预计算：array 值 -> (name, 格式化状态串)，迭代时零函数调用（优化热点）
+        self._entries = {
+            idx: (name, format_block_states(states, strip_states) if states else "")
+            for idx, (name, states) in self.parsed.items()
+        }
 
     # ---------------- 两种格式初始化 ----------------
     def _init_sponge(self, root):
@@ -592,7 +760,7 @@ class SchematicSource:
         return self.array3[:, z0:z1 + 1, x0:x1 + 1]
 
     def iter_blocks(self, x0=None, x1=None, z0=None, z1=None):
-        """yield (绝对x, y, 绝对z, name, states)；可限 x/z 范围。"""
+        """yield (绝对x, y, 绝对z, name, 格式化状态串)；可限 x/z 范围。"""
         if x0 is None:
             x0, x1 = 0, self.W - 1
         if z0 is None:
@@ -600,20 +768,22 @@ class SchematicSource:
         col = self._region(x0, x1, z0, z1)
         mask = col != self.air
         ys, zs, xs = np.nonzero(mask)
-        for y, zl, xl in zip(ys.tolist(), zs.tolist(), xs.tolist()):
-            item = self.parsed.get(int(col[y, zl, xl]))
+        vals = col[ys, zs, xs]  # 批量取值，避免逐格 numpy 标量
+        for y, zl, xl, v in zip(ys.tolist(), zs.tolist(), xs.tolist(), vals.tolist()):
+            item = self._entries.get(v)
             if item is None:
                 continue
             yield (x0 + xl + self.ox, y + self.oy, z0 + zl + self.oz, item[0], item[1])
 
     def iter_all_blocks(self):
-        """yield 全部方块（按 y 分块迭代，避免一次性大掩码）。"""
+        """yield (绝对x, y, 绝对z, name, 格式化状态串)；按 y 分块迭代。"""
         for y0 in range(0, self.H, 64):
             col = self.array3[y0:y0 + 64, :, :]
             mask = col != self.air
             ys, zs, xs = np.nonzero(mask)
-            for y, z, x in zip(ys.tolist(), zs.tolist(), xs.tolist()):
-                item = self.parsed.get(int(col[y, z, x]))
+            vals = col[ys, zs, xs]  # 批量取值，避免逐格 numpy 标量
+            for y, z, x, v in zip(ys.tolist(), zs.tolist(), xs.tolist(), vals.tolist()):
+                item = self._entries.get(v)
                 if item is None:
                     continue
                 yield (x + self.ox, y0 + y + self.oy, z + self.oz, item[0], item[1])
@@ -890,7 +1060,6 @@ def _iter_classic_lines(
     fill_merge: bool,
     strip_states: frozenset | None,
     progress: bool,
-    peak=None,
 ) -> Iterator[str]:
     X, Y, Z = int(schem["Width"]), int(schem["Height"]), int(schem["Length"])
     total = X * Y * Z
@@ -909,13 +1078,17 @@ def _iter_classic_lines(
     blocks3 = _pad_arr(blocks)
     data3 = _pad_arr(data) if data is not None else None
 
-    # 预计算映射表：id*16+data -> (方块名, 状态)
+    # 预计算映射表：id*16+data -> (方块名, 格式化状态串)
     parsed = {}
+    parsed_str = {}
     for key, spec in load_schematic_table().items():
         try:
-            parsed[int(key)] = _parse_spec(spec)
+            name, states = _parse_spec(spec)
         except (TypeError, ValueError):
             continue
+        key = int(key)
+        parsed[key] = (name, states)
+        parsed_str[key] = (name, format_block_states(states, strip_states) if states else "")
 
     anycol = np.any(blocks3 != 0, axis=0)
     zs, xs = np.nonzero(anycol)
@@ -945,15 +1118,13 @@ def _iter_classic_lines(
         for y, zl, xl in zip(ys.tolist(), zs.tolist(), xs.tolist()):
             bid = int(colb[y, zl, xl]) & 0xFF
             dval = int(cold[y, zl, xl]) & 0xFF if cold is not None else 0
-            item = parsed.get((bid << 4) | dval)
+            item = parsed_str.get((bid << 4) | dval)
             if item is None:
                 continue
-            name, states = item
-            region[(xl, y, zl)] = (
-                name, format_block_states(states, strip_states) if states else "",
-            )
+            name, state_str = item
+            region[(xl, y, zl)] = (name, state_str)
         return region
 
     yield from _iter_chunk_lines(
-        chunks, chunk_size, fill_merge, strip_states, progress, total_blocks, get_region, peak
+        chunks, chunk_size, fill_merge, strip_states, progress, total_blocks, get_region
     )
