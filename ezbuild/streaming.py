@@ -15,6 +15,7 @@ import gzip
 import io
 import json
 import os
+import time
 from typing import Callable, Iterator, Union
 
 import nbtlib
@@ -134,6 +135,75 @@ def _refresh_memory_postfix(bar) -> None:
 # 公共入口
 # ---------------------------------------------------------------------------
 
+def _write_parallel_lines(output: Output, files: list) -> Output:
+    """把并行生成的 setblock 行临时文件合并写出（去末尾换行）。"""
+    close = not hasattr(output, "write")
+    fileobj = open(output, "w", encoding="utf-8") if close else output
+    try:
+        for i, path in enumerate(files):
+            with open(path, "r", encoding="utf-8") as f:
+                data = f.read()
+            if i == len(files) - 1 and data.endswith("\n"):
+                data = data[:-1]
+            fileobj.write(data)
+    finally:
+        if close:
+            fileobj.close()
+    return output
+
+
+def _plain_setblock_txt(source, output, strip_states, progress, workers) -> Output:
+    """纯 setblock txt（--nofill，无 tp/分块）。
+
+    txt 是 I/O 瓶颈（写大文本），单进程直写最优；仅 ``-t`` 强制时才并行
+    （并行要多写一次临时文件并合并，反而慢，不自动启用）。
+    """
+    src = SchematicSource(source, strip_states=strip_states)
+    if workers is not None:
+        files = _generate_txt_parallel(src, src._entries, _parallel_worker_count(workers), progress)
+        try:
+            return _write_parallel_lines(output, files)
+        finally:
+            for f in files:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+    close = not hasattr(output, "write")
+    fileobj = open(output, "w", encoding="utf-8") if close else output
+    bar = None
+    n = 0
+    if progress:
+        from tqdm.rich import tqdm
+
+        counts = np.bincount(src.array3.ravel())
+        bar = tqdm(total=int(src.array3.size - counts[src.air]),
+                   desc="生成 setblock", unit="个")
+        _refresh_memory_postfix(bar)
+    try:
+        first = True
+        for x, y, z, name, state_str in src.iter_all_blocks():
+            coord = f"~{x} ~{y} ~{z}"
+            if not first:
+                fileobj.write("\n")
+            fileobj.write(f"setblock {coord} {name} [{state_str}]" if state_str
+                          else f"setblock {coord} {name}")
+            first = False
+            if bar is not None:
+                bar.update(1)
+                n += 1
+                if n % 10000 == 0:
+                    _refresh_memory_postfix(bar)
+    finally:
+        if bar is not None:
+            _refresh_memory_postfix(bar)
+            bar.close()
+        if close:
+            fileobj.close()
+    return output
+
+
 def schematic_to_txt(
     source: Source,
     output: Output,
@@ -142,27 +212,70 @@ def schematic_to_txt(
     fill_merge: bool = True,
     strip_states: frozenset | None = None,
     progress: bool = False,
+    workers: int | None = None,
 ):
-    """流式把 Sponge .schem 或经典 .schematic 渲染为分区块 txt，增量写入 ``output``。
+    """流式把 Sponge .schem 或经典 .schematic 渲染为 txt，增量写入 ``output``。
 
-    输出与「格式 → Building → txt」逐字节一致。``progress`` 为 True 时显示
-    tqdm 进度条（含当前内存占用）。返回 ``output``。
+    ``fill_merge=True``：分区块（16×16 + tp 导航 + fill 合并，单进程）；
+    ``fill_merge=False``（--nofill）：纯 setblock（无 tp/分块），大文件或 ``-t`` 时共享内存并行。
+    输出与「格式 → Building → txt」逐字节一致。返回 ``output``。
     """
+    if not fill_merge:
+        return _plain_setblock_txt(source, output, strip_states, progress, workers)
+
     close = not hasattr(output, "write")
     fileobj = open(output, "w", encoding="utf-8") if close else output
+    write_bar = None
+    conv_time = 0.0
+    write_time = 0.0
     try:
-        first = True
-        for line in iter_schematic_txt_lines(
+        it = iter_schematic_txt_lines(
             source, chunk_size=chunk_size, fill_merge=fill_merge,
             strip_states=strip_states, progress=progress,
-        ):
+        )
+        first = True
+        while True:
+            # 生成（CPU）时间
+            t0 = time.monotonic()
+            try:
+                line = next(it)
+            except StopIteration:
+                break
+            conv_time += time.monotonic() - t0
+
+            # 写入磁盘（I/O）时间
+            t0 = time.monotonic()
+            # 写入进度条（懒创建，让"转换方块"条在它上面；不显示内存）
+            if write_bar is None and progress:
+                from tqdm.rich import tqdm
+
+                write_bar = tqdm(desc="写入磁盘", unit="行")
             if not first:
                 fileobj.write("\n")
             fileobj.write(line)
             first = False
+            write_time += time.monotonic() - t0
+            if write_bar is not None:
+                write_bar.update(1)
     finally:
+        if write_bar is not None:
+            # tqdm.rich 的 total 在创建时固定；完成时直接更新 rich task 为 100%
+            # （rich 在 Windows 非 TTY 下渲染可能崩，整体容错）
+            try:
+                write_bar._prog.update(
+                    write_bar._task_id, total=write_bar.n, completed=write_bar.n
+                )
+                write_bar.refresh()
+            except Exception:
+                pass
+            try:
+                write_bar.close()
+            except Exception:
+                pass
         if close:
             fileobj.close()
+    if progress:
+        print(f"      转换用时 {conv_time:.1f}s，写入用时 {write_time:.1f}s")
     return output
 
 
@@ -567,15 +680,19 @@ def _iter_chunk_lines(
 ) -> Iterator[str]:
     """按 S 序遍历区块，逐行产出 tp 与 fill/setblock 命令。"""
     bar = None
+    chunk_bar = None
     try:
         if progress:
             from tqdm.rich import tqdm
 
             bar = tqdm(total=total_blocks, desc="转换方块", unit="个")
             _refresh_memory_postfix(bar)
+            chunk_bar = tqdm(total=len(chunks), desc="区块化", unit="块")
 
         prev_x = prev_z = 0
         for sx, ex, sz, ez in _s_sort(chunks, chunk_size):
+            if chunk_bar is not None:
+                chunk_bar.update(1)  # 区块进度（含空区块）
             region = get_region(sx, ex, sz, ez)
             if not region:
                 continue
@@ -589,6 +706,8 @@ def _iter_chunk_lines(
             for cmd in sorted(fill_cmds + setblock_cmds, key=_y_sort_key):
                 yield cmd
     finally:
+        if chunk_bar is not None:
+            chunk_bar.close()
         if bar is not None:
             bar.close()
 

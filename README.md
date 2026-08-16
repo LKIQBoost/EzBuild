@@ -57,6 +57,11 @@ python main.py ibi -i 巨型建筑.schematic
 python main.py mcstructure -i 巨型建筑.schem
 python main.py schem -i 巨型建筑.schem
 python main.py cmd_json -i 巨型建筑.schematic
+
+# -t N：强制共享内存多进程并行（默认大文件自动并行，小文件单进程）。
+# 注意：生成是磁盘 I/O 瓶颈，ibi 能提速 ~1.7 倍；txt 单进程直写已最优，并行反而慢。
+python main.py ibi -i 巨型建筑.schem -t 4
+python main.py ibi -i 巨型建筑.schem -t          # -t 不接数字 = 自动进程数
 ```
 
 > setblock/fill 输出默认省略所有 `*_bit` 开关状态（`open_bit`/`toggle_bit`/`powered_bit` 等），

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
+import os
 import time
 import sys
 
@@ -36,6 +37,20 @@ def cmd_list(_args) -> int:
 def _read_building(src: str) -> ezbuild.Building | ezbuild.Song:
     """读取一个建筑或音乐文件（按扩展名自动识别）。"""
     return ezbuild.convert_read(src)
+
+
+def _print_schem_info(src: str) -> None:
+    """打印 schem/schematic 文件信息（大小、尺寸、方块数、命令方块数）。"""
+    from ezbuild.streaming import SchematicSource, _count_non_air
+
+    s = SchematicSource(src)
+    W, H, L = s.size
+    size = os.path.getsize(src)
+    size_str = f"{size / 1e6:.1f}MB" if size >= 1e6 else f"{size / 1024:.0f}KB"
+    print(
+        f"      文件 {size_str} | 尺寸 {W}×{H}×{L} | "
+        f"方块 {_count_non_air(s):,} 个, 命令方块 {len(list(s.command_blocks())):,} 个"
+    )
 
 
 def _output_path(src: str, to_format: str, args: argparse.Namespace) -> str:
@@ -88,11 +103,16 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
                 kwargs["fill_merge"] = not args.nofill
             if "strip_states" in kwargs:
                 kwargs["strip_states"] = frozenset() if args.all_states else None
-            if to_format == "ibi":
+            if to_format in ("ibi", "txt"):
                 kwargs["workers"] = args.threads  # -t 强制/指定并行进程数
+                if to_format == "txt" and not args.nofill and args.threads is not None:
+                    print("  [提示] txt 分区块模式是磁盘 I/O 瓶颈，-t 并行不生效；可加 --nofill 得纯 setblock（自动单进程已最优）")
+            elif args.threads is not None:
+                print(f"  [提示] -t 并行仅对 ibi/txt 生效，{to_format} 忽略 -t")
 
             output = _output_path(src, to_format, args)
             print(f"[1/2] 流式转换: {src}")
+            _print_schem_info(src)  # 转换前输出文件信息
             fn(src, output, **kwargs)
             elapsed = time.monotonic() - start
             print(f"[2/2] 输出格式 {to_format} -> {output}")
