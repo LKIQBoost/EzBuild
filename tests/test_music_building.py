@@ -7,7 +7,7 @@ import pytest
 import ezbuild
 from ezbuild.model import MODE_CHAIN, MODE_IMPULSE
 from ezbuild.music_builder import song_to_building
-from ezbuild.song import Note, Song
+from ezbuild.song import InstrumentPart, Note, Song
 
 
 def _make_song(n=10) -> Song:
@@ -160,6 +160,161 @@ class TestSongToBuilding:
         assert b.size[1] <= 96
         assert b.size[0] > 16  # 足迹增大了
         assert _chain_continuous(b)
+
+
+class TestInstrumentParts:
+    """MIDI 乐器部件（响度补偿/半音偏移/多部件）对命令方块输出的影响。"""
+
+    def test_volume_compensation(self):
+        """harp 响度补偿 0.53：0.8×0.53=0.42。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(
+            time=0.0, note=60, velocity=0.8, sound="note.harp", channel=0,
+            instrument_parts=(InstrumentPart("note.harp", 0.53),),
+        )]
+        b = song_to_building(song)
+        assert "playsound note.harp @s ~ ~ ~ 0.42" in b.command_blocks[0].command
+
+    def test_volume_compensation_clamped(self):
+        """响度补偿超 1 时钳制到 1.00（如 note.bell 3.0）。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(
+            time=0.0, note=60, velocity=0.8, sound="note.bell", channel=0,
+            instrument_parts=(InstrumentPart("note.bell", 3.0),),
+        )]
+        b = song_to_building(song)
+        assert "1.00" in b.command_blocks[0].command
+
+    def test_percussion_pitch_offset(self):
+        """打击乐镲片 pitch = 2^(31/12)，不再钳到 1.0；音量 1.5 补偿。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(
+            time=0.0, note=44, velocity=0.8, sound="random.fizz", channel=9,
+            instrument_parts=(InstrumentPart("random.fizz", 1.5, 31),),
+        )]
+        b = song_to_building(song)
+        cmd = b.command_blocks[0].command
+        assert "playsound random.fizz @s" in cmd
+        assert f"{round(2.0 ** (31 / 12), 3):.3f}" in cmd  # 5.993 不被 2.0 钳住
+        assert "1.00" in cmd                                # 0.8×1.5=1.2 → 钳 1.00
+
+    def test_melodic_pitch_offset(self):
+        """旋律半音偏移（电话铃 note.bit +6）叠加到音符音高上。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(
+            time=0.0, note=66, velocity=0.8, sound="note.bit", channel=0,
+            instrument_parts=(InstrumentPart("note.bit", 2.0, 6),),
+        )]
+        b = song_to_building(song)
+        # pitch = 2^((66-66+6)/12) = 2^0.5 ≈ 1.414
+        assert "1.414" in b.command_blocks[0].command
+
+    def test_multipart_orchestra_hit_same_tick(self):
+        """orchestra_hit：bass+flute 同刻双命令（delay 0,0）。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(
+            time=0.0, note=60, velocity=0.8, sound="note.bass", channel=0,
+            instrument_parts=(InstrumentPart("note.bass", 0.4),
+                              InstrumentPart("note.flute", 0.3)),
+        )]
+        b = song_to_building(song)
+        assert b.command_block_count == 2
+        assert "playsound note.bass" in b.command_blocks[0].command
+        assert "playsound note.flute" in b.command_blocks[1].command
+        assert [c.tick_delay for c in b.command_blocks] == [0, 0]
+
+    def test_multipart_telephone_ring_spaced(self):
+        """telephone_ring：8 个部件、间隔 50ms=1 刻。"""
+        parts = tuple(
+            InstrumentPart("note.bit", 2.0, 6 if i % 2 == 0 else -6,
+                           0.0 if i == 0 else 0.05)
+            for i in range(8)
+        )
+        song = Song(tempo=120.0)
+        song.notes = [Note(
+            time=0.0, note=60, velocity=0.8, sound="note.bit", channel=0,
+            instrument_parts=parts,
+        )]
+        b = song_to_building(song)
+        assert b.command_block_count == 8
+        assert [c.tick_delay for c in b.command_blocks] == [0, 1, 1, 1, 1, 1, 1, 1]
+        # 交替高低音：+6 -> -6 -> +6 ...
+        # 命令 ... <vol> <pitch> <vol>，pitch 是倒数第 2 个 token
+        # note 60：+6 → 2^0 = 1.000；-6 → 2^-1 = 0.500（钳到 0.5）
+        pitches = [c.command.split(" ")[-2] for c in b.command_blocks]
+        assert pitches[0] == "1.000" and pitches[1] == "0.500"
+
+    def test_no_parts_single_default(self):
+        """无 instrument_parts（NBS/手写 Song）：单命令、音量 1.0、常规音高。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(time=0.0, note=66, velocity=0.8, sound="note.harp", channel=0)]
+        b = song_to_building(song)
+        assert b.command_block_count == 1
+        assert "0.80 1.000 0.80" in b.command_blocks[0].command
+
+    def test_midi_roundtrip_to_building_trumpet(self):
+        """MIDI 写入/读回 -> building：小号程序号最终产出 note.trumpet 指令。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(time=0.0, note=60, velocity=0.8, sound="note.trumpet", channel=1)]
+        data = ezbuild.registry.get_writer("mid")().render(song)
+        read = ezbuild.registry.get_reader("mid")().read(data)
+        b = song_to_building(read)
+        assert "playsound note.trumpet" in b.command_blocks[0].command
+
+
+class TestPitchAccuracy:
+    """音准：弯音应用 + 超范围音符八度折叠（代替钳平）。"""
+
+    @staticmethod
+    def _pitch(cmd):
+        return cmd.split(" ")[-2]
+
+    def test_pitch_bend_applied(self):
+        """MIDI 弯音应用到命令方块：note 66 + 弯音 2 半音 -> pitch 2^(2/12)。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(time=0.0, note=66, velocity=0.8, sound="note.harp",
+                           channel=0, pitch_bend=2.0)]
+        b = song_to_building(song)
+        assert self._pitch(b.command_blocks[0].command) == f"{round(2 ** (2 / 12), 3):.3f}"
+
+    def test_octave_fold_high_note(self):
+        """超范围高音八度折叠而非钳平：note 100 -> 1.782（钳制会到 2.0）。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(time=0.0, note=100, velocity=0.8, sound="note.harp", channel=0)]
+        b = song_to_building(song)
+        assert self._pitch(b.command_blocks[0].command) == f"{round(2 ** (10 / 12), 3):.3f}"
+
+    def test_octave_fold_low_note(self):
+        """超范围低音八度折叠：note 40 -> semis -26 -> 折到 -2 -> 0.891。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(time=0.0, note=40, velocity=0.8, sound="note.harp", channel=0)]
+        b = song_to_building(song)
+        assert self._pitch(b.command_blocks[0].command) == f"{round(2 ** (-2 / 12), 3):.3f}"
+
+    def test_octave_fold_preserves_relative_pitch(self):
+        """两个超范围音符折叠后保持音程差，不被钳成同音。"""
+        song = Song(tempo=120.0)
+        song.notes = [
+            Note(time=0.0, note=100, velocity=0.8, sound="note.harp", channel=0),
+            Note(time=0.05, note=94, velocity=0.8, sound="note.harp", channel=0),
+        ]
+        b = song_to_building(song)
+        pitches = [self._pitch(c.command) for c in b.command_blocks]
+        assert pitches[0] != pitches[1]
+
+    def test_fold_disabled_clamps(self):
+        """fold=False 保留原始八度：note 100 -> 钳到 2.0。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(time=0.0, note=100, velocity=0.8, sound="note.harp", channel=0)]
+        b = song_to_building(song, fold=False)
+        assert self._pitch(b.command_blocks[0].command) == "2.000"
+
+    def test_in_range_unchanged(self):
+        """可播放范围内音符不折叠：note 60 -> 0.707。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(time=0.0, note=60, velocity=0.8, sound="note.harp", channel=0)]
+        b = song_to_building(song)
+        assert self._pitch(b.command_blocks[0].command) == f"{round(2 ** (-6 / 12), 3):.3f}"
 
 
 class TestMcStructureRoundTrip:

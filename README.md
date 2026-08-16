@@ -150,6 +150,10 @@ ezbuild/
 - **节拍**：1 NBS tick = 1/4 拍（16 分音符），NBS tempo = bpm/15；MIDI 输出 division 480。
 - **乐器**：GM 程序号 ↔ NBS 乐器号 都以 Minecraft 音效名为中介映射；
   鼓（NBS 乐器 bd/snare/hat ↔ MIDI 通道 9）。
+  MIDI → 命令方块时采用 midi-mcstructure_next 的两层映射（程序号/打击乐音符 →
+  抽象音效名 → 实际 playsound 部件），用上 1.21 铜管音阶块、`random.fizz` 镲片等，
+  每个乐器带响度补偿与半音偏移；只有 MIDI 来源的音符携带这些部件，
+  mid↔nbs 音乐文件往返不受影响。
 - 力度为有效音量（MIDI 通道音量 CC7 / NBS 层音量会折入音符力度）。
 
 **音乐 → 建筑**（`ezbuild.music_builder.song_to_building`）：
@@ -158,8 +162,13 @@ ezbuild/
 增大足迹），每块 `facing_direction` 指向下一块；第 0 块为脉冲命令方块
 （红石触发启动），其余为连锁命令方块（auto）；每块写一条 `/execute ... playsound`，
 `TickDelay` 为距上一音符的游戏刻数（1 秒 = 20 刻），总时长 = 各块 TickDelay 累加。
-音高 `2**((note-66)/12)`（与 NBS key 45↔note 66 一致），鼓固定 pitch 1.0，
-超范围钳制 [0.5, 2.0]；/playsound 固定用基岩版语法。
+音高 `2**((note-66)/12)`（与 NBS key 45↔note 66 一致），并叠加 MIDI 弯音
+（`Note.pitch_bend`，弯音范围按 RPN 0/1 解析，默认 ±2 半音）；打击乐以基准 66
+起算。**超范围音符默认八度折叠**进可播放范围（pitch 0.5-2.0），保住相对音准
+（钳制会把极端音符压成同音、旋律被压平）；`--raw-octave` 关闭折叠保留原始八度。
+非音阶块音效（镲片等）不折叠也不钳到 2.0，保留半音偏移的区分度；音量会乘以
+乐器响度补偿后钳 [0,1]。多部件乐器（如 orchestra_hit、telephone_ring）展开成
+多个命令方块；/playsound 固定用基岩版语法。
 
 ## 扩展新格式
 

@@ -22,6 +22,23 @@ from dataclasses import dataclass, field
 # 中立模型
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True, slots=True)
+class InstrumentPart:
+    """一个音符的"乐器部件"（参照 midi-mcstructure_next 的 sound_list）。
+
+    MIDI 程序号 / 打击乐音符最终解析为一组部件（多为 1 个，少数如
+    telephone_ring / orchestra_hit / helicopter 是多个）：每个部件是
+    一条实际 playsound 音效，带**响度补偿**、**半音偏移**与**相对上一部件
+    的间隔秒**。只被 ``music_builder``（命令方块转换）消费，不影响
+    NBS/MIDI 写出，因此 mid↔nbs round-trip 保持不变。
+    """
+
+    sound: str
+    volume: float = 1.0       # 响度补偿（乘到音符力度上，如 note.bell 3.0）
+    pitch_offset: float = 0.0  # 半音偏移（镲片 +19/+31/+38 等，加到音高公式里）
+    delay_sec: float = 0.0    # 距上一部件的间隔秒（reference 的 delay 是 ms）
+
+
 @dataclass(slots=True)
 class Note:
     """一个音符（中立表示）。
@@ -46,6 +63,7 @@ class Note:
     panning: float = 0.0
     pitch_bend: float = 0.0
     duration: float = 0.0
+    instrument_parts: tuple[InstrumentPart, ...] = ()  # 空 = 单部件默认（仅 building 转换用）
 
 
 @dataclass(slots=True)
@@ -116,68 +134,154 @@ def is_drum_sound(sound: str) -> bool:
     return sound in DRUM_SOUND_TO_PERCUSSION_NOTE
 
 
-# GM 程序号 -> NBS 标准乐器号。
-# 数据取自 midi2nbs.py（OctoFlare, MIT）midi_ins 表的 instrument 字段，
-# 仅保留乐器号（其每乐器的 octave 位移本工具暂不采用）。
-_PROGRAM_TO_NBS_INSTRUMENT = {
-    0: 0, 1: 15, 2: 15, 3: 15, 4: 0, 5: 0, 6: 5, 7: 14,
-    8: 7, 9: 7, 10: 7, 11: 10, 12: 10, 13: 9, 14: 7, 15: 5,
-    16: 6, 17: 10, 18: 6, 19: 6, 20: 6, 21: 6, 22: 6, 23: 6,
-    24: 5, 25: 5, 26: 0, 27: 5, 28: 1, 29: 12, 30: 12, 31: 5,
-    32: 1, 33: 1, 34: 1, 35: 1, 36: 5, 37: 5, 38: 1, 39: 15,
-    40: 6, 41: 6, 42: 6, 43: 6, 44: 6, 45: 1, 46: 0, 47: 3,
-    48: 6, 49: 6, 50: 6, 51: 6, 52: 6, 53: 6, 54: 6, 55: 3,
-    56: 6, 57: 6, 58: 6, 59: 12, 60: 6, 61: 12, 62: 12, 63: 6,
-    64: 6, 65: 6, 66: 6, 67: 6, 68: 6, 69: 6, 70: 6, 71: 6,
-    72: 6, 73: 6, 74: 6, 75: 6, 76: 6, 77: 6, 78: 6, 79: 6,
-    80: 13, 81: 6, 82: 6, 83: 6, 84: 5, 85: 6, 86: 6, 87: 1,
-    88: 7, 89: 6, 90: 6, 91: 6, 92: 6, 93: 6, 94: 6, 95: 8,
-    96: 8, 97: 6, 98: 8, 99: 5, 100: 15, 101: 6, 102: 6, 103: 5,
-    104: 14, 105: 14, 106: 14, 107: 5, 108: 10, 109: 6, 110: 6, 111: 6,
-    112: 8, 113: 11, 114: 10, 115: 9, 116: 2, 117: 3, 118: 3, 119: 8,
-    120: 4, 121: 6, 122: 8, 123: 6, 124: 7, 125: 2, 126: 3, 127: 3,
+# ---------------------------------------------------------------------------
+# MIDI 乐器映射（移植自 midi-mcstructure_next 的 mapping.json + profile.json
+# new_bedrock.sound_list）
+#
+# 两层：MIDI 程序号/打击乐音符 -> 抽象音效名 -> 实际 playsound 部件列表。
+# 每个部件带响度补偿（volume）、半音偏移（pitch_offset）与相对上一部件间隔
+# （delay_sec）。抽象名 -> 部件逐条取自 new_bedrock.sound_list；程序号 ->
+# 抽象名取自 mapping.json 非打击乐段；打击乐音符 -> 抽象名取自其 percussion
+# 段，但**保留 ezbuild 核心鼓约定**（36↔note.bd、38↔note.snare、42↔note.hat，
+# 保证 mid↔nbs 往返不变），其余一律用参考表。
+# ---------------------------------------------------------------------------
+
+# 抽象音效名 -> 实际 playsound 部件（new_bedrock.sound_list）
+_ABSTRACT_PARTS = {
+    'harp': (InstrumentPart('note.harp', 0.53),),
+    'pling': (InstrumentPart('note.pling', 0.4),),
+    'bit': (InstrumentPart('note.bit', 1.2),),
+    'rain': (InstrumentPart('ambient.weather.rain', 1.0),),
+    'xylophone': (InstrumentPart('note.xylophone', 0.9),),
+    'iron_xylophone': (InstrumentPart('note.iron_xylophone', 0.86),),
+    'banjo': (InstrumentPart('note.banjo', 0.8),),
+    'flute': (InstrumentPart('note.flute', 0.8),),
+    'chime': (InstrumentPart('note.chime', 1.0),),
+    'bass': (InstrumentPart('note.bass', 1.0),),
+    'guitar': (InstrumentPart('note.guitar', 1.0),),
+    'bell': (InstrumentPart('note.bell', 3.0),),
+    'cow_bell': (InstrumentPart('note.cow_bell', 0.68),),
+    'hat': (InstrumentPart('note.hat', 1.0),),
+    'snare': (InstrumentPart('note.snare', 1.0),),
+    'base_drum': (InstrumentPart('note.bd', 1.5),),
+    'didgeridoo': (InstrumentPart('note.didgeridoo', 0.8),),
+    # 1.21 铜管音阶块（4 种氧化态）
+    'trumpet': (InstrumentPart('note.trumpet', 0.7),),
+    'french_horn': (InstrumentPart('note.trumpet_exposed', 0.7),),
+    'trombone': (InstrumentPart('note.trumpet_weathered', 0.7),),
+    'tuba': (InstrumentPart('note.trumpet_oxidized', 0.7),),
+    # 非音阶块音效：镲片用 random.fizz + 半音偏移区分（转换时不钳到 2.0）
+    'cymbal': (InstrumentPart('random.fizz', 1.0, 19),),
+    'open_cymbal': (InstrumentPart('random.fizz', 1.5, 19),),
+    'pedal_cymbal': (InstrumentPart('random.fizz', 1.5, 31),),
+    'closed_cymbal': (InstrumentPart('random.fizz', 1.5, 38),),
+    'cabasa': (InstrumentPart('random.fizz', 1.2, 19),),
+    'shaker': (InstrumentPart('random.fizz', 1.2, 31),),
+    'parrot': (InstrumentPart('mob.parrot.idle', 1.0),),
+    'crystal': (InstrumentPart('chime.amethyst_block', 2.0),),
+    'gun': (InstrumentPart('random.explode', 1.0),),
+    # 多部件：同刻双音
+    'orchestra_hit': (
+        InstrumentPart('note.bass', 0.4),
+        InstrumentPart('note.flute', 0.3),
+    ),
+    # 多部件：电话铃 = note.bit 高低交替 8 次，间隔 50ms
+    'telephone_ring': (
+        InstrumentPart('note.bit', 2.0, 6, 0.0),
+        InstrumentPart('note.bit', 2.0, -6, 0.05),
+        InstrumentPart('note.bit', 2.0, 6, 0.05),
+        InstrumentPart('note.bit', 2.0, -6, 0.05),
+        InstrumentPart('note.bit', 2.0, 6, 0.05),
+        InstrumentPart('note.bit', 2.0, -6, 0.05),
+        InstrumentPart('note.bit', 2.0, 6, 0.05),
+        InstrumentPart('note.bit', 2.0, -6, 0.05),
+    ),
+    # 多部件：直升机 = breeze 引擎 + 8 次旋翼声，间隔 100ms
+    'helicopter': (
+        InstrumentPart('mob.breeze.idle_ground', 0.5),
+        InstrumentPart('mob.breeze.death', 0.5, 0, 0.1),
+        InstrumentPart('mob.breeze.death', 0.5, 0, 0.1),
+        InstrumentPart('mob.breeze.death', 0.5, 0, 0.1),
+        InstrumentPart('mob.breeze.death', 0.5, 0, 0.1),
+        InstrumentPart('mob.breeze.death', 0.5, 0, 0.1),
+        InstrumentPart('mob.breeze.death', 0.5, 0, 0.1),
+        InstrumentPart('mob.breeze.death', 0.5, 0, 0.1),
+        InstrumentPart('mob.breeze.death', 0.5, 0, 0.1),
+    ),
 }
 
-# GM 程序号 -> Minecraft 音效（旋律通道用）
+# MIDI 程序号 -> 抽象音效名（mapping.json 非打击乐段；缺省 = harp）
+_PROGRAM_TO_ABSTRACT = {
+    0: 'harp', 1: 'pling', 2: 'pling', 6: 'guitar', 7: 'iron_xylophone',
+    8: 'iron_xylophone', 9: 'bell', 10: 'bell', 11: 'iron_xylophone',
+    12: 'iron_xylophone', 13: 'xylophone', 14: 'chime',
+    16: 'flute', 17: 'flute', 18: 'flute', 19: 'flute', 20: 'flute',
+    21: 'flute', 22: 'flute', 23: 'flute',
+    24: 'guitar', 25: 'guitar', 26: 'guitar', 27: 'guitar', 28: 'guitar',
+    29: 'guitar', 30: 'bass', 31: 'bass', 32: 'bass', 33: 'guitar',
+    34: 'guitar', 35: 'bass', 36: 'bass', 37: 'bass', 38: 'bass',
+    39: 'bass', 40: 'flute', 41: 'flute', 42: 'flute', 43: 'didgeridoo',
+    45: 'pling', 46: 'harp', 47: 'iron_xylophone',
+    48: 'flute', 49: 'flute', 50: 'flute', 51: 'flute', 52: 'didgeridoo',
+    53: 'flute', 54: 'flute', 55: 'orchestra_hit',
+    56: 'trumpet', 57: 'trombone', 58: 'tuba', 59: 'trumpet',
+    60: 'french_horn',
+    61: 'flute', 62: 'flute', 63: 'flute', 64: 'flute', 65: 'guitar',
+    66: 'bass', 67: 'didgeridoo', 68: 'flute', 69: 'flute',
+    70: 'didgeridoo', 71: 'flute', 72: 'flute', 73: 'flute', 74: 'flute',
+    75: 'flute', 76: 'flute', 77: 'banjo', 78: 'flute', 79: 'flute',
+    80: 'bit', 81: 'bit', 82: 'bit', 83: 'bit', 84: 'bit',
+    85: 'flute', 86: 'flute', 87: 'orchestra_hit', 88: 'banjo',
+    89: 'flute', 90: 'bit', 91: 'orchestra_hit', 92: 'didgeridoo',
+    93: 'iron_xylophone', 94: 'bit', 95: 'bit', 96: 'rain',
+    98: 'crystal', 105: 'banjo', 108: 'xylophone',
+    109: 'flute', 110: 'flute', 111: 'flute', 112: 'cow_bell',
+    114: 'hat', 115: 'xylophone', 116: 'base_drum', 117: 'snare',
+    118: 'snare', 119: 'cymbal', 123: 'parrot', 124: 'telephone_ring',
+    125: 'helicopter', 126: 'hat', 127: 'gun', 612: 'trumpet',
+}
+
+_DEFAULT_ABSTRACT = 'harp'
+
+# GM 打击乐（通道 9）音符 -> 抽象音效名（mapping.json percussion 段；
+# 36/38/42 覆盖为 ezbuild 核心鼓约定保 mid↔nbs 往返；未列出 -> cymbal）
+_PERCUSSION_TO_ABSTRACT = {
+    31: 'hat', 33: 'snare', 34: 'hat', 35: 'base_drum', 36: 'base_drum',
+    37: 'hat', 38: 'snare', 39: 'hat', 40: 'hat', 41: 'base_drum',
+    42: 'hat', 43: 'hat', 44: 'pedal_cymbal', 45: 'base_drum',
+    46: 'open_cymbal', 47: 'snare', 48: 'hat', 50: 'hat',
+    56: 'cow_bell', 69: 'cabasa', 82: 'shaker', 83: 'bell', 84: 'bell',
+}
+
+_DEFAULT_PERCUSSION_ABSTRACT = 'cymbal'
+
+
+def _parts_of(abstract: str) -> tuple[InstrumentPart, ...]:
+    """抽象音效名 -> 部件；未知抽象名回退 harp。"""
+    return _ABSTRACT_PARTS.get(abstract, _ABSTRACT_PARTS[_DEFAULT_ABSTRACT])
+
+
+def program_to_parts(program: int) -> tuple[InstrumentPart, ...]:
+    """MIDI 程序号 -> 乐器部件列表（首部件音效即音色名）。"""
+    return _parts_of(_PROGRAM_TO_ABSTRACT.get(program, _DEFAULT_ABSTRACT))
+
+
+def percussion_note_to_parts(note: int) -> tuple[InstrumentPart, ...]:
+    """GM 打击乐音符 -> 乐器部件列表；未映射回退镲片 (random.fizz)。"""
+    return _parts_of(_PERCUSSION_TO_ABSTRACT.get(note, _DEFAULT_PERCUSSION_ABSTRACT))
+
+
+# GM 程序号 -> 音效名（首部件；NBS->MIDI 音效还原）
 PROGRAM_TO_SOUND = {
-    prog: NBS_INSTRUMENT_TO_SOUND[ins]
-    for prog, ins in _PROGRAM_TO_NBS_INSTRUMENT.items()
+    prog: program_to_parts(prog)[0].sound
+    for prog in range(128)
 }
 
-# Minecraft 音效 -> 代表程序号（每个 NBS 乐器取 midi_ins 中首个程序；
-# 用于 NBS -> MIDI 还原程序号，round-trip 时音效保持不变）
+# Minecraft 音效 -> 代表程序号（每个音效取首个程序；MIDI 写出用）
 SOUND_TO_PROGRAM = {}
-for _prog, _ins in _PROGRAM_TO_NBS_INSTRUMENT.items():
-    _sound = NBS_INSTRUMENT_TO_SOUND[_ins]
-    SOUND_TO_PROGRAM.setdefault(_sound, _prog)
-del _prog, _ins, _sound
-
-
-# GM 打击乐（通道 9）音符 -> Minecraft 音效（取自 midilib.py PERCUSSION_MAP）
-PERCUSSION_NOTE_TO_SOUND = {
-    27: 'note.pling', 28: 'note.pling', 29: 'note.pling',
-    30: 'note.pling', 31: 'note.pling',
-    35: 'note.bd', 36: 'note.bd',                        # 底鼓
-    37: 'note.snare', 38: 'note.snare',                  # 边击/军鼓
-    39: 'note.hat', 40: 'note.snare',
-    41: 'note.bd', 42: 'note.hat', 43: 'note.bd',        # 桶鼓/踩镲
-    44: 'note.hat', 45: 'note.bd', 46: 'note.hat',
-    47: 'note.bd', 48: 'note.bd',
-    49: 'note.hat', 50: 'note.bell',                     # 镲
-    51: 'note.snare', 52: 'note.pling', 53: 'note.pling',
-    54: 'note.pling', 55: 'note.snare', 56: 'note.snare',
-    57: 'note.hat', 58: 'note.pling', 59: 'note.pling',
-    60: 'note.bell', 61: 'note.bell', 62: 'note.bell',
-    63: 'note.pling', 64: 'note.pling', 65: 'note.pling',
-    66: 'note.pling', 67: 'note.pling', 68: 'note.pling',
-    69: 'note.hat', 70: 'note.snare',
-    71: 'note.pling', 72: 'note.pling', 73: 'note.pling',
-    74: 'note.pling', 75: 'note.pling', 76: 'note.pling',
-    77: 'note.pling', 78: 'note.pling', 79: 'note.pling',
-    80: 'note.pling', 81: 'note.pling',
-}
-
-DEFAULT_PERCUSSION_SOUND = 'note.bd'
+for _prog in range(128):
+    SOUND_TO_PROGRAM.setdefault(program_to_parts(_prog)[0].sound, _prog)
+del _prog
 
 
 def sound_to_program(sound: str) -> int:
@@ -192,9 +296,9 @@ def sound_to_nbs_instrument(sound: str) -> int | None:
 
 def program_to_sound(program: int) -> str:
     """MIDI 程序号 -> 音效名；越界回退 note.harp。"""
-    return PROGRAM_TO_SOUND.get(program, 'note.harp')
+    return program_to_parts(program)[0].sound
 
 
 def percussion_note_to_sound(note: int) -> str:
-    """GM 打击乐音符 -> 音效名；未映射回退 note.bd。"""
-    return PERCUSSION_NOTE_TO_SOUND.get(note, DEFAULT_PERCUSSION_SOUND)
+    """GM 打击乐音符 -> 音效名；未映射回退 random.fizz（镲片）。"""
+    return percussion_note_to_parts(note)[0].sound

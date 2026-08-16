@@ -136,6 +136,92 @@ class TestMidRoundTrip:
 
 
 # ---------------------------------------------------------------------------
+# MIDI 乐器映射（参照 midi-mcstructure_next，经 mid round-trip 验证）
+# ---------------------------------------------------------------------------
+
+class TestMidiInstrumentMapping:
+    def test_program_trumpet_family(self):
+        """铜管组不再塌成 flute：56 小号 / 57 长号 / 60 圆号各归其位。"""
+        cases = {
+            "note.trumpet": 56,
+            "note.trumpet_weathered": 57,
+            "note.trumpet_exposed": 60,
+        }
+        for sound, _prog in cases.items():
+            song = Song(tempo=120.0)
+            song.notes = [Note(time=0.0, note=60, velocity=0.8, sound=sound, channel=1)]
+            got = _from("mid", _to("mid", song))
+            assert got.notes[0].sound == sound
+
+    def test_program_parts_carry_volume(self):
+        """读取 MIDI 后音符带乐器部件（响度补偿挂在上面对，velocity 本身不改）。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(time=0.0, note=60, velocity=0.8, sound="note.trumpet", channel=1)]
+        got = _from("mid", _to("mid", song))
+        parts = got.notes[0].instrument_parts
+        assert len(parts) == 1
+        assert parts[0].sound == "note.trumpet"
+        assert parts[0].volume == pytest.approx(0.7)
+        # MIDI 力度字节量化有 ±0.01 容差；且 velocity 未被响度补偿污染
+        assert got.notes[0].velocity == pytest.approx(0.8, abs=0.01)
+
+    def test_unknown_program_defaults_harp(self):
+        from ezbuild.song import program_to_parts
+
+        assert program_to_parts(3)[0].sound == "note.harp"       # 未映射程序
+        assert program_to_parts(200)[0].sound == "note.harp"     # 越界
+        assert program_to_parts(0)[0].volume == pytest.approx(0.53)  # harp 响度补偿
+
+    def test_percussion_pedal_cymbal(self):
+        """踩镲踏板 44 -> random.fizz + 半音偏移 31（区别于其它镲片）。"""
+        song = Song(tempo=120.0)
+        song.notes = [Note(time=0.0, note=44, velocity=0.8, sound="random.fizz", channel=9)]
+        got = _from("mid", _to("mid", song))
+        n = got.notes[0]
+        assert n.sound == "random.fizz"
+        assert n.channel == 9
+        assert n.instrument_parts[0].pitch_offset == pytest.approx(31)
+
+    def test_percussion_core_drum_preserved(self):
+        """混合映射：核心鼓约定 36 底鼓 / 38 军鼓保留，不被参考表覆盖。"""
+        song = Song(tempo=120.0)
+        song.notes = [
+            Note(time=0.0, note=36, velocity=0.8, sound="note.bd", channel=9),
+            Note(time=0.0, note=38, velocity=0.8, sound="note.snare", channel=9),
+        ]
+        got = _from("mid", _to("mid", song))
+        by_note = {n.note: n for n in got.notes}
+        assert by_note[36].sound == "note.bd"
+        assert by_note[38].sound == "note.snare"
+
+    def test_percussion_cowbell(self):
+        """牛铃 56 -> note.cow_bell（参考映射，不再塌成 snare）。"""
+        from ezbuild.song import percussion_note_to_parts
+
+        parts = percussion_note_to_parts(56)
+        assert parts[0].sound == "note.cow_bell"
+
+
+class TestMidiPitchBendRange:
+    """RPN 0/1 弯音范围解析：bend 量 = raw/8192 × 实际范围（默认 ±2）。"""
+
+    def test_default_range_two_semitones(self):
+        """无 RPN：满弯 (+8191) = 默认 ±2 半音。"""
+        got = _from("mid", _minimal_bend_smf())
+        assert got.notes[0].pitch_bend == pytest.approx(2.0, abs=0.01)
+
+    def test_rpn_range_twelve_semitones(self):
+        """RPN 0 + CC6=12（吉他常用 ±12）：满弯 = 12 半音。"""
+        got = _from("mid", _minimal_bend_smf(bend_range_semis=12))
+        assert got.notes[0].pitch_bend == pytest.approx(12.0, abs=0.01)
+
+    def test_rpn_cents_fractional(self):
+        """CC38 百分音叠加：CC6=2 + CC38=64 -> ±2.5 半音。"""
+        got = _from("mid", _minimal_bend_smf(bend_range_semis=2, cents=64))
+        assert got.notes[0].pitch_bend == pytest.approx(2.5, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
 # NBS round-trip
 # ---------------------------------------------------------------------------
 
@@ -390,3 +476,37 @@ def _build_nbs_with_layer_volume(volume=50, note_vel=100, key=45, instrument=0):
     out += bytes([100])                  # 层 panning
     out += bytes([0])                    # 乐器数 0
     return bytes(out)
+
+
+def _minimal_bend_smf(note=60, bend_range_semis=None, cents=None, bend_up=True):
+    """构造最小格式0 MIDI：可选 RPN 0 弯音范围 + 一个满弯音 note。
+
+    - ``bend_range_semis``: 设 RPN 0 的 CC6（弯音范围整数半音）；
+    - ``cents``: 再设 CC38（百分音）；
+    - ``bend_up``: 满弯（+8191）；False 为直音（0）。
+    """
+    def vlq(v):
+        out = bytearray([v & 0x7F])
+        v >>= 7
+        while v:
+            out.append(0x80 | (v & 0x7F))
+            v >>= 7
+        out.reverse()
+        return bytes(out)
+
+    ev = bytearray(b"\x00\xff\x51\x03\x07\xa1\x20")  # tempo 120bpm
+    if bend_range_semis is not None:
+        ev += b"\x00\xb0\x65\x00"                     # CC101 RPN MSB = 0
+        ev += b"\x00\xb0\x64\x00"                     # CC100 RPN LSB = 0
+        ev += b"\x00\xb0\x06" + bytes([bend_range_semis])  # CC6 范围整数半音
+    if cents is not None:
+        ev += b"\x00\xb0\x26" + bytes([cents])        # CC38 百分音
+    if bend_up:
+        ev += b"\x00\xe0\x7f\x7f"                     # 满弯 +8191
+    else:
+        ev += b"\x00\xe0\x00\x40"                     # 直音 8192
+    ev += b"\x00\x90" + bytes([note, 100])            # note_on
+    ev += vlq(480) + b"\x80" + bytes([note, 0])       # note_off @ tick 480
+    ev += b"\x00\xff\x2f\x00"                         # 轨结束
+    return (b"MThd" + struct.pack(">IHHH", 6, 0, 1, 480)
+            + b"MTrk" + struct.pack(">I", len(ev)) + bytes(ev))

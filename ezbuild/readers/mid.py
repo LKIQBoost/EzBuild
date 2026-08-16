@@ -15,8 +15,8 @@ from ..song import (
     Note,
     Layer,
     Song,
-    percussion_note_to_sound,
-    program_to_sound,
+    percussion_note_to_parts,
+    program_to_parts,
 )
 from .base import Reader, Source
 
@@ -198,10 +198,17 @@ class MidReader(Reader):
         volume = {}       # ch -> 0..1
         balance = {}      # ch -> -1..1
         bend = {}         # ch -> 半音
+        # RPN 弯音范围（GM 默认 ±2 半音；RPN 0/1 的 CC 6/38 可改，
+        # 如吉他常用 ±12）。bend = raw/8192 × (整数半音 + 百分音/128)。
+        rpn_msb = {}      # ch -> RPN 高位（101）
+        rpn_lsb = {}      # ch -> RPN 低位（100）
+        bend_semi = {}    # ch -> 弯音范围整数半音
+        bend_cents = {}   # ch -> 弯音范围百分音 0-127
 
         # 进行中的音符：(ch, note) -> [(on_tick, 状态快照), ...]
         active: dict[tuple[int, int], list] = {}
-        raw_notes = []    # (time, channel, note, vel, sound, pan, pitch_bend, duration)
+        # (time, note, vel, sound, channel, pan, pitch_bend, duration, instrument_parts)
+        raw_notes = []
 
         last_tick = 0
         for ev in events:
@@ -214,48 +221,67 @@ class MidReader(Reader):
             if m['type'] == 'program_change':
                 program[ch] = m['value']
             elif m['type'] == 'control_change':
-                if m['control'] == 7:
-                    volume[ch] = m['value'] / 127.0
-                elif m['control'] in (8, 10):
-                    balance[ch] = max(-1.0, min(1.0, (m['value'] - 64) / 64.0))
-                elif m['control'] == 121:
+                cc = m['control']
+                val = m['value']
+                if cc == 7:
+                    volume[ch] = val / 127.0
+                elif cc in (8, 10):
+                    balance[ch] = max(-1.0, min(1.0, (val - 64) / 64.0))
+                elif cc == 121:
                     volume[ch] = 1.0
+                elif cc == 101:       # RPN MSB
+                    rpn_msb[ch] = val
+                elif cc == 100:       # RPN LSB
+                    rpn_lsb[ch] = val
+                elif cc in (6, 38, 96, 97):  # RPN 数据输入（仅当前 RPN=0 生效）
+                    if rpn_msb.get(ch) == 0 and rpn_lsb.get(ch) == 0:
+                        if cc == 6:
+                            bend_semi[ch] = val
+                        elif cc == 38:
+                            bend_cents[ch] = val
+                        elif cc == 96:
+                            bend_semi[ch] = bend_semi.get(ch, 2) + 1
+                        else:
+                            bend_semi[ch] = max(0, bend_semi.get(ch, 2) - 1)
             elif m['type'] == 'pitch_bend':
                 raw = (m['msb'] << 7 | m['lsb']) - 8192
-                bend[ch] = raw / 8192.0 * 2.0  # 默认 ±2 半音
+                bend[ch] = raw / 8192.0 * (
+                    bend_semi.get(ch, 2) + bend_cents.get(ch, 0) / 128.0
+                )
             elif m['type'] == 'note_on' and m['velocity'] > 0:
                 if ch == 9:
-                    sound = percussion_note_to_sound(m['note'])
+                    parts = percussion_note_to_parts(m['note'])
                 else:
-                    sound = program_to_sound(program.get(ch, 0))
+                    parts = program_to_parts(program.get(ch, 0))
                 state = (
                     tick,
                     m['note'],
                     (m['velocity'] / 127.0) * volume.get(ch, 1.0),
-                    sound,
+                    parts[0].sound,
                     balance.get(ch, 0.0),
                     bend.get(ch, 0.0),
+                    parts,
                 )
                 active.setdefault((ch, m['note']), []).append(state)
             elif m['type'] == 'note_off' or (m['type'] == 'note_on' and m['velocity'] == 0):
                 stack = active.get((ch, m['note']))
                 if stack:
-                    on_tick, note, vel, sound, pan, pb = stack.pop()
+                    on_tick, note, vel, sound, pan, pb, parts = stack.pop()
                     raw_notes.append(
                         (conv(on_tick), note, vel, sound, ch, pan, pb,
-                         conv(tick) - conv(on_tick))
+                         conv(tick) - conv(on_tick), parts)
                     )
             # 其它事件（poly_pressure / channel_pressure / unknown）忽略
 
         # 未闭合音符：延续到文件末尾；末尾即起点则用默认时长
         end_sec = conv(last_tick)
         for (ch, note), stack in active.items():
-            for on_tick, n, vel, sound, pan, pb in stack:
+            for on_tick, n, vel, sound, pan, pb, parts in stack:
                 start = conv(on_tick)
                 dur = end_sec - start
                 if dur <= 0:
                     dur = _DEFAULT_NOTE_SECONDS
-                raw_notes.append((start, n, vel, sound, ch, pan, pb, dur))
+                raw_notes.append((start, n, vel, sound, ch, pan, pb, dur, parts))
 
         self._assign_layers(song, raw_notes)
         return song
@@ -310,6 +336,7 @@ class MidReader(Reader):
                         panning=round(n[5], 4),
                         pitch_bend=round(n[6], 4),
                         duration=round(n[7], 4),
+                        instrument_parts=n[8],
                     )
                 )
 

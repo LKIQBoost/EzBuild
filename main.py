@@ -122,8 +122,9 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
     print(f"[1/2] 读取: {src}")
     building = _read_building(src)
     if isinstance(building, ezbuild.Song) and to_format not in ezbuild.MUSIC_FORMATS:
-        # 音乐 → 建筑：先转成命令方块音乐机
-        building = ezbuild.song_to_building(building)  # 固定基岩版 /playsound
+        # 音乐 → 建筑：先转成命令方块音乐机（默认把超范围音符八度折叠保证音准；
+        # --raw-octave 保留原始八度）
+        building = ezbuild.song_to_building(building, fold=not args.raw_octave)
     if isinstance(building, ezbuild.Song):
         n = len(building.notes)
         if n:
@@ -256,6 +257,11 @@ def main(argv=None) -> int:
         "--raw-range",
         action="store_true",
         help="NBS 输出保留原始音高，不做可播放范围(33-57)八度折叠",
+    )
+    parser.add_argument(
+        "--raw-octave",
+        action="store_true",
+        help="音乐转建筑时保留原始八度（不做可播放范围八度折叠，极端音高会被钳到两端）",
     )
     parser.add_argument(
         "-t",

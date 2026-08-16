@@ -22,7 +22,7 @@ from .model import (
     MODE_CHAIN,
     MODE_IMPULSE,
 )
-from .song import Song, is_drum_sound
+from .song import InstrumentPart, Song
 
 # 游戏刻：1 秒 = 20 刻
 TICKS_PER_SECOND = 20
@@ -31,6 +31,11 @@ TICKS_PER_SECOND = 20
 PITCH_BASE = 66
 MIN_PITCH = 0.5
 MAX_PITCH = 2.0
+
+# 非音阶块音效（random.fizz 镲片等）不钳到 2.0 —— 镲片靠 +19/+31/+38
+# 半音偏移出的高 pitch 区分（参照参考项目），这里只做极端值防护
+_MIN_NONNOTE_PITCH = 0.01
+_MAX_NONNOTE_PITCH = 64.0
 
 # Bedrock facing_direction: 0 下 1 上 2 北(-z) 3 南(+z) 4 西(-x) 5 东(+x)
 _FACING_UP = 1
@@ -41,18 +46,46 @@ _FACING_EAST = 5
 _FACING_WEST = 4
 
 
-def _build_playsound(note, edition: str) -> str:
+def _fold_semis(semis: float) -> float:
+    """把半音折进 [-12, +12]（pitch 0.5-2.0，音阶块可播放范围）。
+
+    与 NBS 写出的 fold_range 一致：超范围音符按八度搬移，**保住相对音准**
+    —— 钳制会把极端音符全压成同一音高（旋律被压平），折叠则保留音程关系。
+    """
+    while semis < -12.0:
+        semis += 12.0
+    while semis > 12.0:
+        semis -= 12.0
+    return semis
+
+
+def _build_playsound(note, part: InstrumentPart, edition: str, fold: bool = True) -> str:
     """生成一条 /playsound 命令（不含前导斜杠）。
 
     基岩版：``execute as @a at @s run playsound <sound> @s <pos> <vol> <pitch> <vol>``
     Java 版：中间多一个 ``record`` 音源参数。
+
+    音色/音量/音高来自 ``part``（乐器部件）：音效名、响度补偿（乘力度）、
+    半音偏移（加到 pitch 公式）。旋律音高 = ``2 ** ((note - 66 + 偏移 + 弯音)/12)``，
+    并叠加 ``note.pitch_bend``（MIDI 弯音 / NBS 微调）；打击乐（channel 9）
+    以基准音 66 起算，即 ``2 ** ((偏移 + 弯音)/12)``。
+    ``fold=True`` 时 ``note.*`` 音效把半音八度折叠进可播放范围 [0.5, 2.0]
+    保证音准；``fold=False`` 保留原始八度（极端音符被钳到两端）。
+    非 ``note.*`` 音效（fizz 镲片等）不折叠也不钳到 2.0，保留偏移区分度。
     """
-    if is_drum_sound(note.sound):
-        pitch = 1.0
+    if note.channel == 9:
+        semis = part.pitch_offset + note.pitch_bend
     else:
-        pitch = 2.0 ** ((note.note - PITCH_BASE) / 12.0)
-    pitch = max(MIN_PITCH, min(MAX_PITCH, pitch))
-    vol = max(0.0, min(1.0, note.velocity))
+        semis = note.note - PITCH_BASE + part.pitch_offset + note.pitch_bend
+    if part.sound.startswith("note."):
+        if fold:
+            semis = _fold_semis(semis)
+            pitch = 2.0 ** (semis / 12.0)
+        else:
+            pitch = max(MIN_PITCH, min(MAX_PITCH, 2.0 ** (semis / 12.0)))
+    else:
+        pitch = max(_MIN_NONNOTE_PITCH, min(_MAX_NONNOTE_PITCH, 2.0 ** (semis / 12.0)))
+    vol = max(0.0, min(1.0, note.velocity * part.volume))
 
     if note.panning:
         left = -note.panning if note.panning < 0 else 0.0
@@ -64,8 +97,8 @@ def _build_playsound(note, edition: str) -> str:
     v = "%.2f" % vol
     p = "%.3f" % pitch
     if edition == "java":
-        return f"execute as @a at @s run playsound {note.sound} record @s {pos} {v} {p} {v}"
-    return f"execute as @a at @s run playsound {note.sound} @s {pos} {v} {p} {v}"
+        return f"execute as @a at @s run playsound {part.sound} record @s {pos} {v} {p} {v}"
+    return f"execute as @a at @s run playsound {part.sound} @s {pos} {v} {p} {v}"
 
 
 def _serpentine(n: int, width: int, depth: int, max_height: int):
@@ -129,23 +162,32 @@ def song_to_building(
     depth: int = 16,
     max_height: int = 96,
     edition: str = "bedrock",
+    fold: bool = True,
 ) -> Building:
     """把一首歌转成命令方块音乐机建筑。
 
     - ``width``/``depth``: 水平足迹（默认 16×16，接近正方体，与
       midi-mcstructure_next 推荐大模板一致）；``max_height`` 超过时自动增大足迹。
     - ``edition``: ``"bedrock"`` / ``"java"``，决定 /playsound 语法。
+    - ``fold``: ``True`` 把超范围音符八度折叠进可播放范围（pitch 0.5-2.0）
+      保住相对音准（默认）；``False`` 保留原始八度（极端音符钳到两端）。
     - 音符按 1/20 秒量化到游戏刻，同一刻的多个音符延迟为 0（同时播放）。
     """
     if edition not in ("bedrock", "java"):
         raise ValueError(f"未知游戏版本 {edition!r}，用 bedrock 或 java")
 
-    # 1. 音符 -> 事件（tick, 命令）
+    # 1. 音符 -> 事件（tick, note, part）。每个音符按乐器部件展开：
+    #    多部件（orchestra_hit 同刻双音、telephone_ring 间隔 50ms 等）
+    #    各占一个命令方块；无 instrument_parts（NBS/手写 Song）用单部件默认。
     events = []
     for note in song.notes:
         if note.velocity <= 0:
             continue
-        events.append((round(note.time * TICKS_PER_SECOND), _build_playsound(note, edition)))
+        parts = note.instrument_parts or (InstrumentPart(note.sound),)
+        acc = 0.0
+        for part in parts:
+            acc += part.delay_sec
+            events.append((round((note.time + acc) * TICKS_PER_SECOND), note, part))
     if not events:
         return Building(size=(0, 0, 0), source_format="music")
     events.sort(key=lambda e: e[0])
@@ -153,12 +195,12 @@ def song_to_building(
     # 2. 延迟序列：首个 delay = tick，其余 = 距上一音符的刻数
     cmd_list = []
     last = None
-    for tick, cmd in events:
+    for tick, note, part in events:
         if last is None:
             delay = tick
         else:
             delay = tick - last
-        cmd_list.append((delay, cmd))
+        cmd_list.append((delay, _build_playsound(note, part, edition, fold)))
         last = tick
 
     # 3. 蛇形布局 + 4. 写 Building
