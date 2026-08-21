@@ -21,16 +21,22 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def cmd_list(_args) -> int:
+    from ezbuild.native import DLL_ONLY_FORMATS
+
     print("输入格式（Reader）:")
     for name in registry.list_readers():
         cls = registry.get_reader(name)
         exts = "/".join(cls.extensions)
         print(f"  {name:<14} {exts:<20} {cls.description}")
+    # 世界文件夹不是文件（无扩展名），按目录识别，单独列出
+    print(f"  {'world':<14} {'(文件夹)':<20} "
+          f"Minecraft 世界文件夹（Java region/ 或 Bedrock db/，-pos1 x y z -pos2 x y z 框包围盒）")
     print("\n输出格式（Writer）:")
     for name in registry.list_writers():
         cls = registry.get_writer(name)
         exts = "/".join(cls.extensions)
-        print(f"  {name:<14} {exts:<20} {cls.description}")
+        marker = "（需 -c）" if name in DLL_ONLY_FORMATS else ""
+        print(f"  {name:<14} {exts:<20} {cls.description}{marker}")
     return 0
 
 
@@ -53,6 +59,19 @@ def _print_schem_info(src: str) -> None:
     )
 
 
+def _print_txt_stats(stats: dict) -> None:
+    """打印分区块优化统计：原始指令数 → 输出指令数（fill/setblock/tp），减少百分比。
+
+    参考 fill3d_rust 的压缩率计算；``rate`` 为负数表示指令反而变多（稀疏结构）。
+    """
+    out = stats["fill"] + stats["setblock"] + stats["tp"]
+    print(
+        f"      优化: 原始 {stats['orig']:,} 条 → 输出 {out:,} 条"
+        f"（fill {stats['fill']:,} / setblock {stats['setblock']:,} / tp {stats['tp']:,}）"
+        f"，减少 {stats['rate']:.2f}%"
+    )
+
+
 def _output_path(src: str, to_format: str, args: argparse.Namespace) -> str:
     """计算输出路径：-o 指定，否则按输入名 + 输出扩展名（同路径时加后缀）。"""
     if args.output is not None:
@@ -61,7 +80,12 @@ def _output_path(src: str, to_format: str, args: argparse.Namespace) -> str:
         return args.output
     writer_cls = registry.get_writer(to_format)
     ext = writer_cls.extensions[0] if writer_cls else ".out"
-    output = str(Path(src).with_suffix(ext))
+    p = Path(src)
+    if p.is_dir():
+        # 世界文件夹：输出到同名 + 扩展名（避免 with_suffix 误改文件夹名）
+        output = str(p.with_name(p.name + ext))
+        return output
+    output = str(p.with_suffix(ext))
     if Path(output) == Path(src):
         # 输入输出同路径（如 txt → txt），加后缀避免覆盖
         suffix = "_分区块" if to_format == "txt" else "_转换"
@@ -69,13 +93,163 @@ def _output_path(src: str, to_format: str, args: argparse.Namespace) -> str:
     return output
 
 
+def _convert_one_dll(
+    src: str, args: argparse.Namespace, start: float
+) -> tuple[str, str] | None:
+    """``-c/--cpp`` 快速路径：整个转换交给 C++ DLL（无 GIL、无 Python 模型）。
+
+    返回 ``(输出路径, 输出格式)`` 表示 DLL 转换成功；返回 ``None`` 表示
+    未走 DLL（格式无 DLL 实现 / DLL 不可用 / DLL 转换失败且可回退 Python），
+    调用方继续走原 Python 原生转换。
+    """
+    from ezbuild import native
+
+    to_format = args.format
+    dll_name = native.DLL_WRITERS.get(to_format)
+    if dll_name is None:
+        # 输出格式无 DLL 实现（如 txt / cmd_json / mid / nbs）
+        print(f"  [提示] 输出格式 {to_format} 无 C++ DLL 实现，使用 Python 原生转换")
+        return None
+
+    if not native.is_available():
+        if to_format in native.PYTHON_FALLBACK:
+            # schem/mcstructure/ibi：有 Python 实现，回退
+            print(
+                f"  [提示] 未找到 C++ DLL（{native.not_found_reason()}），"
+                f"使用 Python 原生转换"
+            )
+            return None
+        # DLL 独有格式：无 Python 实现，只能报错
+        raise ValueError(
+            f"输出格式 {to_format} 由 C++ DLL 生成，需要 -c，但 DLL 不可用："
+            f"{native.not_found_reason()}"
+        )
+
+    output = _output_path(src, to_format, args)
+    print(f"[1/2] C++ DLL 转换: {src}")
+
+    if args.all_states or args.nofill or args.raw_range or args.raw_octave:
+        print(
+            "  [提示] -c 走 DLL，--all-states/--nofill/--raw-range/--raw-octave "
+            "等 Python 选项不生效"
+        )
+
+    threads = args.threads if args.threads is not None else 0
+    try:
+        with native.Context() as ctx:
+            try:
+                info = ctx.inspect(src)
+                print(
+                    f"      尺寸 {info.width}×{info.height}×{info.length} | "
+                    f"非空气方块 {info.non_air_blocks:,} 个"
+                )
+            except Exception:
+                pass  # 读不了不拦着，交给 convert 决定
+            ctx.convert(src, dll_name, output, threads=threads)
+    except Exception as e:
+        # 任何原生环节失败（上下文创建/读文件/转换）都按"可回退则回退"处理
+        if to_format in native.PYTHON_FALLBACK:
+            print(f"      DLL 转换失败（{e}），回退 Python 原生转换")
+            return None
+        raise ValueError(f"DLL 转换失败: {e}") from e
+
+    elapsed = time.monotonic() - start
+    print(f"[2/2] 输出格式 {to_format} -> {output}")
+    print(f"      转换完成 ✓（耗时 {_fmt_duration(elapsed)}）")
+    return output, to_format
+
+
+def _convert_world(src: str, args: argparse.Namespace) -> tuple[str, str]:
+    """世界导出：把 Java 世界文件夹内包围盒（起始/结束 xyz）的建筑导出为指定格式。
+
+    流式逐区块转换，内存与包围盒总方块数无关（mcstructure/schem 除外，
+    这两个格式需要整块数组，内存 ≈ 包围盒体积）。
+    """
+    start = time.monotonic()
+    to_format = args.format
+    # 坐标：-pos1/-pos2（WorldEdit 风格）优先，其次 --x1..--z2（兼容旧写法）
+    if args.pos1 is not None or args.pos2 is not None:
+        if args.pos1 is None or args.pos2 is None:
+            raise ValueError("世界导出需要成对坐标：-pos1 x y z 与 -pos2 x y z")
+        x1, y1, z1 = args.pos1
+        x2, y2, z2 = args.pos2
+    else:
+        coords_old = (args.x1, args.y1, args.z1, args.x2, args.y2, args.z2)
+        if any(c is None for c in coords_old):
+            raise ValueError(
+                "世界导出需要完整坐标范围：-pos1 x y z -pos2 x y z（或旧写法 --x1 --y1 --z1 --x2 --y2 --z2）"
+            )
+        x1, y1, z1, x2, y2, z2 = coords_old
+    coords = (x1, y1, z1, x2, y2, z2)
+
+    from ezbuild.world import (
+        world_to_cmd_json,
+        world_to_ibi,
+        world_to_mcstructure,
+        world_to_schem,
+        world_to_txt,
+    )
+
+    _WORLD = {
+        "txt": world_to_txt,
+        "ibi": world_to_ibi,
+        "cmd_json": world_to_cmd_json,
+        "mcstructure": world_to_mcstructure,
+        "schem": world_to_schem,
+    }
+    fn = _WORLD.get(to_format)
+    if fn is None:
+        raise ValueError(
+            f"世界导出不支持输出格式 {to_format!r}（支持: {'/'.join(_WORLD)}；"
+            f"-c DLL 格式 bdx/litematic/mcfn 等不支持世界导出）"
+        )
+
+    output = _output_path(src, to_format, args)
+    x1, y1, z1, x2, y2, z2 = coords
+    print(f"[1/2] 世界导出: {src}")
+    print(f"      坐标范围: ({x1}, {y1}, {z1}) → ({x2}, {y2}, {z2})")
+    kwargs: dict = {"progress": True}
+    if to_format in ("txt", "ibi"):
+        kwargs["strip_states"] = frozenset() if args.all_states else None
+    if to_format == "txt":
+        kwargs["fill_merge"] = not args.nofill
+        if not args.nofill and args.threads is not None:
+            print("  [提示] 世界导出 txt 分区块模式需按顺序输出，-t 并行不生效；可加 --nofill 用纯 setblock 并行")
+    if to_format in ("txt", "ibi") and args.threads is not None:
+        kwargs["workers"] = args.threads  # -t 并行（纯 setblock / ibi）
+    if to_format == "schem" and args.split:
+        kwargs["split"] = True  # 自动拆分成多个 schem（调色板 >256 时）
+    ret = fn(src, output, box=coords, **kwargs)
+
+    elapsed = time.monotonic() - start
+    if isinstance(ret, (list, tuple)):
+        print(f"[2/2] 输出格式 {to_format} -> 拆分为 {len(ret)} 个文件")
+        for p in ret:
+            print(f"      {p}")
+        output = str(ret[0])
+    else:
+        print(f"[2/2] 输出格式 {to_format} -> {output}")
+    print(f"      转换完成 ✓（耗时 {_fmt_duration(elapsed)}）")
+    return output, to_format
+
+
 def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
     """转换单个文件，返回 (输出路径, 输出格式)。出错抛异常。"""
     start = time.monotonic()
+    if Path(src).is_dir():
+        # 世界文件夹导出（需 --x1..--z2 包围盒坐标）
+        return _convert_world(src, args)
     if not Path(src).is_file():
         raise FileNotFoundError(f"输入文件不存在: {src}")
 
     to_format = args.format  # 第一个位置参数（输出格式，必填）
+
+    # -c/--cpp：优先走 C++ DLL 快速转换（无 GIL、不建 Python 模型）。
+    # 返回 (输出, 格式) 表示已转换完成；None 表示未走 DLL，继续 Python 原生路径。
+    if args.cpp:
+        result = _convert_one_dll(src, args, start)
+        if result is not None:
+            return result
 
     # schem / schematic -> 建筑格式：流式增量转换，避免巨型结构载入整座建筑占满内存
     src_fmt = registry.format_for_path(src)
@@ -119,6 +293,27 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
             print(f"      转换完成 ✓（耗时 {_fmt_duration(elapsed)}）")
             return output, to_format
 
+    # txt → txt：未分区块 txt 重排分区块。直接流式解析分组（不建 Building 模型），
+    # 省掉 Building.blocks 与中间 dict 的重复拷贝，大文件内存和时间都大减。
+    if src_fmt == "txt" and to_format == "txt":
+        from ezbuild.streaming import txt_to_chunked_txt
+
+        output = _output_path(src, to_format, args)
+        print(f"[1/2] 流式转换: {src}")
+        _, stats = txt_to_chunked_txt(
+            src,
+            output,
+            fill_merge=not args.nofill,
+            strip_states=frozenset() if args.all_states else None,
+            progress=True,
+        )
+        if stats is not None:
+            _print_txt_stats(stats)
+        elapsed = time.monotonic() - start
+        print(f"[2/2] 输出格式 {to_format} -> {output}")
+        print(f"      转换完成 ✓（耗时 {_fmt_duration(elapsed)}）")
+        return output, to_format
+
     print(f"[1/2] 读取: {src}")
     building = _read_building(src)
     if isinstance(building, ezbuild.Song) and to_format not in ezbuild.MUSIC_FORMATS:
@@ -153,6 +348,9 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
     if args.raw_range:
         # NBS 输出不折叠音高（保留原始音高）
         kwargs["fold_range"] = False
+    if to_format == "txt" and not args.nofill:
+        # 分区块 txt 的 fill 合并阶段显示进度条（纯 setblock 直写无需）
+        kwargs["progress"] = True
     if kwargs:
         try:
             writer = writer_cls(**kwargs)
@@ -212,6 +410,13 @@ def cmd_convert(args) -> int:
 
 
 def main(argv=None) -> int:
+    # Windows 中文控制台默认 GBK 无法编码 ✓ 等字符，改为"替换"模式避免转换完成时报错；
+    # 只影响无法编码的字符（GBK 下 ✓→?），不影响中文与 UTF-8 终端。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     print(gradient_ascii("Ez Build", start_color=(0, 255, 128), end_color=(0, 0, 255)))
     parser = argparse.ArgumentParser(
         prog="ezbuild",
@@ -271,8 +476,50 @@ def main(argv=None) -> int:
         type=int,
         default=None,
         metavar="N",
-        help="强制并行转换（-t 自动进程数，-t N 指定 N 个进程）；"
+        help="强制并行转换（-t 自动，-t N 指定 N）；"
+             "Python 路径=共享内存多进程，-c 时传给 DLL 线程数。"
              "默认大文件（非空气方块≥100万）自动并行，小文件单进程",
+    )
+    parser.add_argument(
+        "-c",
+        "--cpp",
+        action="store_true",
+        help="使用随包的 C++ DLL（water_structure_shared.dll）做整文件转换，"
+             "突破 Python 性能限制与解释器锁；DLL 不支持的格式/读不了的文件"
+             "自动回退 Python 原生转换。schem/mcstructure/ibi/txt 走 DLL"
+             "（txt 的 DLL 输出是绝对坐标指令文件，与 Python 分区块 txt 不同），"
+             "并额外解锁 bdx/schematic/litematic/mcfn/axiombp/fuhong 输出格式",
+    )
+    # 世界导出：-i 指向世界文件夹时需给出包围盒坐标（世界坐标，含端点）。
+    # -pos1/-pos2（WorldEdit 风格，各接 3 个数）优先；旧写法 --x1..--z2 兼容。
+    parser.add_argument(
+        "-pos1",
+        "--pos1",
+        nargs=3,
+        type=int,
+        metavar=("X", "Y", "Z"),
+        help="世界导出起始坐标（-pos1 x y z）",
+    )
+    parser.add_argument(
+        "-pos2",
+        "--pos2",
+        nargs=3,
+        type=int,
+        metavar=("X", "Y", "Z"),
+        help="世界导出结束坐标（-pos2 x y z）",
+    )
+    parser.add_argument("--x1", "--x-min", type=int, metavar="X", help="世界导出起始 x 坐标（旧写法，建议用 -pos1）")
+    parser.add_argument("--y1", "--y-min", type=int, metavar="Y", help="世界导出起始 y 坐标（旧写法，建议用 -pos1）")
+    parser.add_argument("--z1", "--z-min", type=int, metavar="Z", help="世界导出起始 z 坐标（旧写法，建议用 -pos1）")
+    parser.add_argument("--x2", "--x-max", type=int, metavar="X", help="世界导出结束 x 坐标（旧写法，建议用 -pos2）")
+    parser.add_argument("--y2", "--y-max", type=int, metavar="Y", help="世界导出结束 y 坐标（旧写法，建议用 -pos2）")
+    parser.add_argument("--z2", "--z-max", type=int, metavar="Z", help="世界导出结束 z 坐标（旧写法，建议用 -pos2）")
+    parser.add_argument(
+        "-s",
+        "--split",
+        action="store_true",
+        help="schem 导出时若区域方块种类超过 256（Sponge 调色板上限），"
+             "自动沿 x/z 轴拆分成多个 <名>_N.schem（每个 ≤256 种）",
     )
 
     args = parser.parse_args(argv)

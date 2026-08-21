@@ -12,6 +12,6 @@ from .._discover import discover
 discover(__name__, Writer)
 
 # 显式导入兜底（Nuitka 打包后 pkgutil 扫不到模块，必须显式 import 触发注册）
-from . import cmd_json, ibi, mcstructure, mid, nbs, schem, txt  # noqa: E402,F401
+from . import cmd_json, dll_only, ibi, mcstructure, mid, nbs, schem, txt  # noqa: E402,F401
 
 __all__ = ["Writer"]

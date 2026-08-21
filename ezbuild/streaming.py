@@ -25,110 +25,17 @@ from .model import Block, CommandBlock, COMMAND_BLOCK_IDS, COMMAND_BLOCK_MODES, 
 from .readers.base import Source
 from .readers.schem import _as_uint8, _parse_blockstate
 from .readers.schematic import _parse_spec
-from .utils import format_block_states, load_schematic_table, tag_to_python
+from .readers.txt import _coord, _states_from
+from .utils import format_block_states, load_schematic_table, normalize_block_name, tag_to_python
 from .writers.txt import _divide_chunks, _optimize_region, _s_sort, _y_sort_key
 
 Output = Union[str, "os.PathLike", "io.TextIOBase"]
 
-# 进度条用 tqdm.rich（rich 美化）；rich 是实验特性，过滤实验警告
-try:
-    import warnings
-
-    from tqdm import TqdmExperimentalWarning
-
-    warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
-except ImportError:  # pragma: no cover
-    pass
-
-
-# ---------------------------------------------------------------------------
-# 当前进程内存（MB）——跨平台，懒加载
-# ---------------------------------------------------------------------------
-_memory_fn = None
-
-
-def _build_memory_fn():
-    """返回一个零参返回 RSS(MB) 的函数；无法测量返回 None。"""
-    # psutil 最通用
-    try:
-        import psutil  # noqa: F401
-
-        return lambda: psutil.Process().memory_info().rss / 1e6
-    except ImportError:
-        pass
-    # Windows：K32GetProcessMemoryInfo
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        class _PMC(ctypes.Structure):
-            _fields_ = [
-                ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
-                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
-                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
-            ]
-
-        dll = ctypes.WinDLL("kernel32")
-        fn = dll.K32GetProcessMemoryInfo
-        fn.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
-        fn.restype = wintypes.BOOL
-        get_cur = ctypes.windll.kernel32.GetCurrentProcess
-
-        def _win_mem() -> float | None:
-            c = _PMC()
-            c.cb = ctypes.sizeof(_PMC)
-            if fn(get_cur(), ctypes.byref(c), c.cb):
-                return c.WorkingSetSize / 1e6
-            return None
-
-        return _win_mem
-    except Exception:
-        pass
-    # Linux：/proc/self/status
-    try:
-        def _linux_mem() -> float | None:
-            with open("/proc/self/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        return float(line.split()[1]) / 1024.0
-            return None
-
-        _linux_mem()  # 试一次确认可用
-        return _linux_mem
-    except Exception:
-        pass
-    return None
-
-
-def _memory_mb() -> float | None:
-    """当前进程 RSS（MB）；无法测量返回 None。"""
-    global _memory_fn
-    if _memory_fn is None:
-        _memory_fn = _build_memory_fn()
-    if _memory_fn is None:
-        return None
-    try:
-        return _memory_fn()
-    except Exception:
-        return None
-
-
-def _refresh_memory_postfix(bar) -> None:
-    """在进度条描述里刷新实时内存占用（当前 RSS）。
-
-    ``tqdm.rich`` 不渲染 postfix（无槽位），改写到 desc（task.description）。
-    """
-    cur = _memory_mb()
-    if cur is None:
-        return
-    base = getattr(bar, "_mem_base", None)
-    if base is None:
-        base = bar.desc or ""
-        bar._mem_base = base
-    bar.desc = f"{base} | 内存 {cur:.0f}MB"
-    bar.refresh()
+# 进度条与内存显示从 _progress 引入（共享，避免 writers/streaming 循环导入）；
+# 保留 _memory_mb/_refresh_memory_postfix 别名以便旧代码引用。
+from ._progress import make_progress  # noqa: F401
+from ._progress import memory_mb as _memory_mb  # noqa: F401
+from ._progress import refresh_memory_postfix as _refresh_memory_postfix  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +188,220 @@ def schematic_to_txt(
 
 # 向后兼容别名（schem_to_txt 现在也接受经典 .schematic）
 schem_to_txt = schematic_to_txt
+
+
+# ---------------------------------------------------------------------------
+# 流式 txt → 分区块 txt（未分区块 setblock/fill 文本重排分块）
+# ---------------------------------------------------------------------------
+def _txt_lines(source):
+    """逐行产出 txt 源（bytes 一次性解码；路径按行迭代，避免整文件+splitlines 列表）。"""
+    if isinstance(source, (bytes, bytearray)):
+        yield from bytes(source).decode("utf-8", errors="replace").splitlines()
+    else:
+        with open(source, "r", encoding="utf-8", errors="replace") as f:
+            yield from f
+
+
+def _iter_txt_blocks(lines) -> Iterator[tuple[int, int, int, str, dict]]:
+    """从 txt 行迭代产出方块 ``(x, y, z, name, states)``；fill 展开，tp/其它行忽略。"""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("setblock"):  # setblock 最常见，优先判断
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            yield (
+                _coord(parts[1]), _coord(parts[2]), _coord(parts[3]),
+                normalize_block_name(parts[4]), _states_from(parts[5:]),
+            )
+        elif line.startswith("fill"):
+            parts = line.split()
+            if len(parts) < 8:
+                continue
+            x1, y1, z1, x2, y2, z2 = (_coord(p) for p in parts[1:7])
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+            if z1 > z2:
+                z1, z2 = z2, z1
+            name = normalize_block_name(parts[7])
+            states = _states_from(parts[8:])
+            for x in range(x1, x2 + 1):
+                for y in range(y1, y2 + 1):
+                    for z in range(z1, z2 + 1):
+                        yield (x, y, z, name, states)
+
+
+def _scan_txt_bounds(lines):
+    """第一遍扫描：返回 ``(min_x, max_x, min_z, max_z, 解析方块总数, 原始指令数)`` 或 None（空输入）。
+
+    ``解析方块总数`` 供进度条用；``原始指令数`` = setblock/fill 命令行数，供优化率统计。
+    """
+    min_x = min_z = 1 << 60
+    max_x = max_z = -(1 << 60)
+    total = 0
+    cmd = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("setblock"):
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            x = _coord(parts[1])
+            z = _coord(parts[3])
+            if x < min_x:
+                min_x = x
+            if x > max_x:
+                max_x = x
+            if z < min_z:
+                min_z = z
+            if z > max_z:
+                max_z = z
+            total += 1
+            cmd += 1
+        elif line.startswith("fill"):
+            parts = line.split()
+            if len(parts) < 8:
+                continue
+            x1, y1, z1, x2, y2, z2 = (_coord(p) for p in parts[1:7])
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+            if z1 > z2:
+                z1, z2 = z2, z1
+            if x1 < min_x:
+                min_x = x1
+            if x2 > max_x:
+                max_x = x2
+            if z1 < min_z:
+                min_z = z1
+            if z2 > max_z:
+                max_z = z2
+            total += (x2 - x1 + 1) * (y2 - y1 + 1) * (z2 - z1 + 1)
+            cmd += 1
+    if total == 0:
+        return None
+    return min_x, max_x, min_z, max_z, total, cmd
+
+
+def txt_to_chunked_txt(
+    source: Source,
+    output: Output,
+    *,
+    chunk_size: int = 16,
+    fill_merge: bool = True,
+    strip_states: frozenset | None = None,
+    insert_count: int = 0,
+    progress: bool = False,
+) -> tuple[Output, dict | None]:
+    """流式把未分区块的 setblock/fill txt 转为分区块 txt，增量写入 ``output``。
+
+    直接解析 txt → 按 16×16 区块分组 → 每区块 fill 合并 → 逐行写出。
+    不建 Building 模型、不把整份输出拼成一个大字符串：内存 ≈ 方块分组字典
+    （+ 单个区块），比「TxtReader → TxtWriter」省掉 Building.blocks 与
+    中间 dict 的重复拷贝。
+    ``fill_merge=False``（--nofill）：纯 setblock 流式直写（无 tp/分块/合并）。
+    输出与「格式 → Building → txt」逐字节一致。
+    返回 ``(output, stats)``：``stats`` 为分区块优化统计
+    ``{"orig": 原始指令数, "fill": .., "setblock": .., "tp": .., "rate": 减少百分比}``，
+    ``--nofill`` 时为 ``None``。
+    """
+    close = not hasattr(output, "write")
+    fileobj = open(output, "w", encoding="utf-8") if close else output
+    try:
+        if not fill_merge:
+            # --nofill：读一行 → 写一行，保持文件顺序（无合并，无可统计优化率）
+            first = True
+            for x, y, z, name, states in _iter_txt_blocks(_txt_lines(source)):
+                state_str = format_block_states(states, strip_states)
+                if not first:
+                    fileobj.write("\n")
+                first = False
+                fileobj.write(f"setblock ~{x} ~{y} ~{z} {name}")
+                if state_str:
+                    fileobj.write(f" [{state_str}]")
+            return output, None
+
+        # 第一遍：包围盒 + 方块总数（进度条用）+ 原始指令数（优化率统计）
+        scanned = _scan_txt_bounds(_txt_lines(source))
+        if scanned is None:
+            return output, None  # 空输入 → 空输出
+        min_x, max_x, min_z, max_z, total, orig_cmds = scanned
+        chunks = _divide_chunks(min_x, max_x, min_z, max_z, chunk_size)
+
+        bar = None
+        if progress:
+            bar = make_progress(total, "转换方块", "个")
+        try:
+            # 第二遍：直接按区块分组（不建 Building / blocks dict），进度随解析推进
+            groups: dict[tuple[int, int], dict[tuple[int, int, int], tuple[str, str]]] = {}
+            n = 0
+            for x, y, z, name, states in _iter_txt_blocks(_txt_lines(source)):
+                state_str = format_block_states(states, strip_states)
+                gx, gz = (x - min_x) // chunk_size, (z - min_z) // chunk_size
+                rel = ((x - min_x) % chunk_size, y, (z - min_z) % chunk_size)
+                groups.setdefault((gx, gz), {})[rel] = (name, state_str)
+                if bar is not None:
+                    bar.update(1)
+                    n += 1
+                    if n % 10000 == 0:
+                        _refresh_memory_postfix(bar)
+
+            # 逐区块输出（tp + fill/setblock，按 y 排序，fill 优先）
+            first = True
+            prev_x = prev_z = 0
+            n_tp = n_fill = n_setblock = 0
+
+            def emit(s: str) -> None:
+                nonlocal first
+                if not first:
+                    fileobj.write("\n")
+                fileobj.write(s)
+                first = False
+
+            for sx, ex, sz, ez in _s_sort(chunks, chunk_size):
+                region = groups.get(
+                    ((sx - min_x) // chunk_size, (sz - min_z) // chunk_size), {}
+                )
+                if not region:
+                    continue
+                emit(f"tp ~{sx - prev_x} ~ ~{sz - prev_z}")
+                n_tp += 1
+                if insert_count:
+                    for _ in range(insert_count):
+                        emit("testfor @s")
+                prev_x, prev_z = sx, sz
+                fill_cmds, setblock_cmds = _optimize_region(region, fill_merge)
+                n_fill += len(fill_cmds)
+                n_setblock += len(setblock_cmds)
+                for cmd in sorted(fill_cmds + setblock_cmds, key=_y_sort_key):
+                    emit(cmd)
+        finally:
+            if bar is not None:
+                _refresh_memory_postfix(bar)
+                bar.close()
+    finally:
+        if close:
+            fileobj.close()
+
+    # 优化统计：原始 setblock/fill 指令数 → 输出指令数（fill + setblock + tp 导航），
+    # 参考 fill3d_rust 的压缩率计算
+    out_cmds = n_fill + n_setblock + n_tp
+    rate = (orig_cmds - out_cmds) / orig_cmds * 100 if orig_cmds else 0.0
+    stats = {
+        "orig": orig_cmds,
+        "fill": n_fill,
+        "setblock": n_setblock,
+        "tp": n_tp,
+        "rate": rate,
+    }
+    return output, stats
 
 
 def iter_schematic_txt_lines(
@@ -537,6 +658,53 @@ def _generate_txt_parallel(src, entries, workers, progress) -> list:
     return tmp_files
 
 
+def _pack_ibi(
+    output: Output,
+    txt_source,
+    txt_len: int,
+    json_bytes: bytes,
+    progress: bool,
+) -> Output:
+    """把 setblock 文本源 + 命令方块 JSON 打包为完整 IBI 文件（流式 XOR 写出）。
+
+    ``txt_source`` 为类文件对象（已 seek 到开头）；``txt_len`` 单独传入避免 seek。
+    schem 流式路径与世界导出共用。
+    """
+    import random
+
+    from .writers.ibi import encode_varint
+
+    close_out = not hasattr(output, "write")
+    fileobj = open(output, "wb") if close_out else output
+    pack_bar = None
+    if progress:
+        from tqdm.rich import tqdm
+
+        pack_bar = tqdm(total=txt_len + len(json_bytes), desc="打包加密", unit="B", unit_scale=True)
+        _refresh_memory_postfix(pack_bar)
+    try:
+        fileobj.write(b"IBImport ")
+        for data, length in ((txt_source, txt_len), (io.BytesIO(json_bytes), len(json_bytes))):
+            key = random.randint(1, 255)
+            table = bytes(i ^ key for i in range(256))  # 快速 XOR 映射表（C 速度）
+            fileobj.write(encode_varint(length))
+            fileobj.write(bytes([key]))
+            while True:
+                chunk = data.read(1 << 20)
+                if not chunk:
+                    break
+                fileobj.write(chunk.translate(table))
+                if pack_bar is not None:
+                    pack_bar.update(len(chunk))
+                    _refresh_memory_postfix(pack_bar)
+    finally:
+        if pack_bar is not None:
+            pack_bar.close()
+        if close_out:
+            fileobj.close()
+    return output
+
+
 def schematic_to_ibi(
     source: Source,
     output: Output,
@@ -619,36 +787,15 @@ def schematic_to_ibi(
     ]
     json_bytes = json.dumps(json_content, ensure_ascii=False, indent=4).encode("utf-8")
 
-    # 阶段 3：打包加密（IBImport + 两段 XOR，快速 translate + 进度条）
+    # 阶段 3：打包加密（IBImport + 两段 XOR，流式写出）
     if tmp_files_to_clean is not None:
         txt_len = sum(os.path.getsize(f) for f in tmp_files_to_clean)
     else:
         tmp.seek(0, 2)
         txt_len = tmp.tell()
         tmp.seek(0)
-    close_out = not hasattr(output, "write")
-    fileobj = open(output, "wb") if close_out else output
-    pack_bar = None
-    if progress:
-        from tqdm.rich import tqdm
-
-        pack_bar = tqdm(total=txt_len + len(json_bytes), desc="打包加密", unit="B", unit_scale=True)
-        _refresh_memory_postfix(pack_bar)
     try:
-        fileobj.write(b"IBImport ")
-        for data, length in ((txt_source, txt_len), (io.BytesIO(json_bytes), len(json_bytes))):
-            key = random.randint(1, 255)
-            table = bytes(i ^ key for i in range(256))  # 快速 XOR 映射表（C 速度）
-            fileobj.write(encode_varint(length))
-            fileobj.write(bytes([key]))
-            while True:
-                chunk = data.read(1 << 20)
-                if not chunk:
-                    break
-                fileobj.write(chunk.translate(table))
-                if pack_bar is not None:
-                    pack_bar.update(len(chunk))
-                    _refresh_memory_postfix(pack_bar)
+        return _pack_ibi(output, txt_source, txt_len, json_bytes, progress)
     finally:
         if tmp_files_to_clean is not None:
             txt_source.close()
@@ -659,11 +806,6 @@ def schematic_to_ibi(
                     pass
         else:
             tmp.close()
-        if pack_bar is not None:
-            pack_bar.close()
-        if close_out:
-            fileobj.close()
-    return output
 
 
 # ---------------------------------------------------------------------------
@@ -675,10 +817,14 @@ def _iter_chunk_lines(
     fill_merge: bool,
     strip_states: frozenset | None,
     progress: bool,
-    total_blocks: int,
+    total_blocks: int | None,
     get_region: Callable,
 ) -> Iterator[str]:
-    """按 S 序遍历区块，逐行产出 tp 与 fill/setblock 命令。"""
+    """按 S 序遍历区块，逐行产出 tp 与 fill/setblock 命令。
+
+    ``total_blocks`` 为 None 时进度条不显示总进度（只计已转换数，供世界导出等
+    无法预先统计的场景）。
+    """
     bar = None
     chunk_bar = None
     try:
@@ -938,7 +1084,18 @@ class SchematicSource:
 # ---------------------------------------------------------------------------
 # 流式 mcstructure / schem（直接构建调色板 + block_data，不建 Building 模型）
 # ---------------------------------------------------------------------------
-def _trimmed_source(src: SchematicSource):
+def _as_source(source):
+    """路径/字节 → SchematicSource；已是 source 对象（WorldSource 等）则原样返回。
+
+    WorldSource 提供 array3/parsed/air/ox/oy/oz/command_blocks 等鸭子类型属性，
+    因此 schem→mcstructure/schem 的流式函数可直接复用于世界导出。
+    """
+    if isinstance(source, (str, os.PathLike, bytes, bytearray)):
+        return SchematicSource(source)
+    return source
+
+
+def _trimmed_source(src):
     """裁切到实际方块范围，返回调色板信息。
 
     返回 ``(min_coords, size, palette, lookup, region)``：
@@ -996,10 +1153,14 @@ def _states_to_nbt(states: dict):
 
 
 def schematic_to_mcstructure(source: Source, output: Output, *, progress: bool = False) -> Output:
-    """流式把 schem/schematic 写为 .mcstructure（不建 Building 模型）。"""
+    """流式把 schem/schematic 写为 .mcstructure（不建 Building 模型）。
+
+    ``source`` 可以是路径/字节（自动构建 SchematicSource），也可以是已构造的
+    方块源对象（如 WorldSource，见 :func:`_as_source`）。
+    """
     from nbtlib.tag import Compound, Int, IntArray, List, Short, String
 
-    src = SchematicSource(source)
+    src = _as_source(source)
     trimmed = _trimmed_source(src)
     if trimmed is None:
         return _write_output(output, _empty_mcstructure())
@@ -1051,10 +1212,14 @@ def schematic_to_mcstructure(source: Source, output: Output, *, progress: bool =
 
 
 def schematic_to_schem(source: Source, output: Output, *, progress: bool = False) -> Output:
-    """流式把 schem/schematic 写为 Sponge .schem（不建 Building 模型）。"""
+    """流式把 schem/schematic 写为 Sponge .schem（不建 Building 模型）。
+
+    ``source`` 可以是路径/字节（自动构建 SchematicSource），也可以是已构造的
+    方块源对象（如 WorldSource，见 :func:`_as_source`）。
+    """
     from nbtlib.tag import ByteArray, Compound, Int, IntArray, List, String, Byte
 
-    src = SchematicSource(source)
+    src = _as_source(source)
     trimmed = _trimmed_source(src)
     if trimmed is None:
         return _write_output(output, _empty_schem())

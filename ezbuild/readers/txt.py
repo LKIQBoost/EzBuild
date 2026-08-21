@@ -92,12 +92,19 @@ class TxtReader(Reader):
 
 
 def _coord(token: str) -> int:
-    """把 ``~x`` / ``~-1`` / ``~`` 解析为整数坐标。"""
+    """把 ``~x`` / ``~-1`` / ``~`` 解析为整数坐标。
+
+    整数坐标直接 ``int()``（快路径），带小数点等再回退 ``int(float())``——
+    setblock/fill 坐标几乎都是整数，省掉每次 float 解析开销。
+    """
     if token.startswith("~"):
         token = token[1:]
     if not token:
         return 0
-    return int(float(token))
+    try:
+        return int(token)
+    except ValueError:
+        return int(float(token))
 
 
 def _states_from(parts: list[str]) -> dict[str, Any]:
