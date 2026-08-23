@@ -101,6 +101,10 @@ python main.py schematic -i 巨型建筑.bdx -c      # 经典 Java .schematic �
 > 会提示并自动回退 Python 原生转换，功能不受影响，只是不加速。
 > `cmd_json` / `mid` / `nbs` 无 DLL 实现，始终走 Python。
 
+> `-c/--cpp` 的 C++ 转换引擎引用自开源项目 **WaterStructure**
+> （<https://pypi.org/project/water-structure/>），其 `water_structure_shared.dll`
+> 随 ezbuild 分发，仅供本工具调用。WaterStructure 的版权与许可以其项目自身声明为准。
+
 > setblock/fill 输出默认省略所有 `*_bit` 开关状态（`open_bit`/`toggle_bit`/`powered_bit` 等），
 > 让指令更简洁；用 `--all-states` 保留全部。`facing_direction`（朝向）和
 > `conditional_bit`（命令方块条件模式）始终保留。命令方块 JSON 的 `IsConditional` 始终输出。
@@ -329,3 +333,9 @@ python -m pytest tests/ -q
 - `nbtlib` — mcstructure / NBT 解析
 - `brotli` — BDX 解压
 - `tqdm` + `rich` — 流式转换进度条（`tqdm.rich` 美化）
+
+## 引用与致谢
+
+- **WaterStructure**（[pypi.org/project/water-structure/](https://pypi.org/project/water-structure/)）——
+  开源 C++ 结构转换引擎，本工具 `-c/--cpp` 快速路径调用的 `water_structure_shared.dll`
+  由其编译分发（当前内置版本 0.1.3）。WaterStructure 的版权与许可以其项目自身声明为准。
