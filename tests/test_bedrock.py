@@ -11,7 +11,7 @@ from ezbuild.bedrock import BedrockWorldSource
 from ezbuild.world import world_to_cmd_json, world_to_ibi, world_to_mcstructure, world_to_schem, world_to_txt
 from ezbuild.writers.ibi import decode_ibi
 
-from .bedrock_fixture import make_bedrock_world
+from .bedrock_fixture import make_bedrock_world, make_bedrock_world_netease
 
 
 @pytest.fixture
@@ -89,6 +89,25 @@ def test_invalid_world(tmp_path):
 
     with pytest.raises(ValueError, match="不是有效的世界文件夹"):
         open_world_source(tmp_path / "nope", (0, 0, 0, 15, 15, 15))
+
+
+def test_netease_encrypted_world(tmp_path):
+    """网易加密的 Bedrock 世界：自动推导 key 并解密 .ldb，方块提取一致。"""
+    from ezbuild.world import world_to_schem
+
+    world = make_bedrock_world_netease(tmp_path)
+    ws = BedrockWorldSource(str(world), (0, 0, 0, 15, 31, 15))
+    blocks = _blocks_set(ws)
+    assert blocks[(3, 1, 4)][0] == "stone"
+    assert blocks[(2, 17, 3)][0] == "command_block"
+    assert len(blocks) == 3
+    cbs = list(ws.command_blocks())
+    assert len(cbs) == 1
+    ws.close()
+    # 完整导出也正常
+    out = tmp_path / "ne.schem"
+    world_to_schem(str(world), out, (0, 0, 0, 15, 31, 15))
+    assert out.stat().st_size > 0
 
 
 # ---------------------------------------------------------------------------

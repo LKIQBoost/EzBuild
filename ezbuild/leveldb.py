@@ -21,8 +21,51 @@ import zlib
 from collections import OrderedDict
 from pathlib import Path
 
+import numpy as np
+
 # LevelDB footer 魔数（0xdb4775248b80fb57 小端）
 _MAGIC = b"\x57\xfb\x80\x8b\x24\x75\x47\xdb"
+# 网易（NetEase）加密存档：每个加密文件带 4 字节头 [0x80, 0x1D, 0x30, 0x01]，
+# 其余字节用 8 字节 key 连续 XOR（从数据起点逐字节取 key 模 8）。
+_NE_HEADER = b"\x80\x1d\x30\x01"
+
+
+def _xor_block(data: bytes, key: bytes, start_pos: int) -> bytes:
+    """用 key（循环）从 ``start_pos`` 开始对 ``data`` 逐字节 XOR（向量化）。
+
+    ``start_pos`` 是 data 首字节在**加密数据区**（去掉 4 字节头）内的绝对偏移，
+    key 偏移 = ``(start_pos + i) % len(key)``。
+    """
+    if not key:
+        return data
+    arr = np.frombuffer(data, dtype=np.uint8)
+    pos = (np.arange(start_pos, start_pos + len(data)) % len(key))
+    key_arr = np.frombuffer(key, dtype=np.uint8)[pos]
+    return np.bitwise_xor(arr, key_arr).tobytes()
+
+
+def _netease_key(db_dir) -> bytes | None:
+    """检测并推导网易加密 key；非网易存档返回 None。
+
+    key 从加密的 CURRENT 文件推导：CURRENT 明文 = ``MANIFEST-XXXX\\n``，
+    key_derived = 加密数据 XOR 明文（即 XOR key 循环 8 字节，前后 8 相同则取前 8）。
+    """
+    db_dir = Path(db_dir)
+    try:
+        cur = (db_dir / "CURRENT").read_bytes()
+    except OSError:
+        return None
+    if not cur.startswith(_NE_HEADER):
+        return None
+    enc_cur = cur[len(_NE_HEADER):]
+    manifests = sorted(db_dir.glob("MANIFEST-*"), key=lambda p: p.name)
+    for m in manifests:
+        name = m.name.encode("utf-8")
+        source = name + b"\x0a"
+        kd = bytes(enc_cur[i] ^ source[i % len(source)] for i in range(len(enc_cur)))
+        if len(kd) >= 16 and kd[:8] == kd[8:16]:
+            return kd[:8]
+    return None
 # 日志块大小
 _LOG_BLOCK = 32768
 # 数据块尾 = type(1) + crc(4)
@@ -103,24 +146,38 @@ def _file_num(name: str) -> int:
 class _LdbFile:
     """单个 .ldb：解析 footer + 索引块，按需读数据块。"""
 
-    __slots__ = ("path", "handles", "keys", "true_min", "max_key", "_f")
+    __slots__ = ("path", "handles", "keys", "true_min", "max_key", "_f", "_ne_key", "_ne_off")
 
-    def __init__(self, path):
+    def __init__(self, path, ne_key: bytes | None = None):
         self.path = path
         self.handles: list[tuple[bytes, int, int]] = []  # [(索引键, offset, size)]
         self.keys: list[bytes] = []  # 索引键列表（缓存，避免每次 bisect 重建）
         self.true_min = b""  # 文件真实最小内部键（首块首条）
         self.max_key = b""   # 文件最大内部键（末块末条）
         self._f = None
+        # 网易加密：文件带 4 字节头 → 数据区从第 4 字节起连续 XOR
+        self._ne_key = None
+        self._ne_off = 0
+        if ne_key:
+            try:
+                with open(self.path, "rb") as f:
+                    head = f.read(4)
+                if head == _NE_HEADER:
+                    self._ne_key = ne_key
+                    self._ne_off = len(_NE_HEADER)
+            except OSError:
+                pass
         self._parse()
 
     def _parse(self):
         with open(self.path, "rb") as f:
             size = os.fstat(f.fileno()).st_size
-            if size < 48:
+            if size < 48 + self._ne_off:
                 return
             f.seek(size - 48)
             footer = f.read(48)
+            if self._ne_key:
+                footer = _xor_block(footer, self._ne_key, size - 48 - self._ne_off)
             if len(footer) < 48 or footer[40:48] != _MAGIC:
                 return
             _meta_off, _meta_size, pos = _parse_handle(footer, 0)
@@ -139,12 +196,16 @@ class _LdbFile:
                 if first is not None:
                     self.true_min = first[0]
 
-    @staticmethod
-    def _read_block_at(f, offset: int, size: int) -> bytes | None:
-        f.seek(offset)
+    def _read_block_at(self, f, offset: int, size: int) -> bytes | None:
+        # 网易加密：footer handle 的 offset 相对"标准内容"（去掉 4 字节头），
+        # 原始文件位置 = offset + 4；XOR 相位用标准 offset。
+        read_off = offset + self._ne_off if self._ne_key else offset
+        f.seek(read_off)
         raw = f.read(size + _BLOCK_TRAILER)
         if len(raw) < size + _BLOCK_TRAILER:
             return None
+        if self._ne_key:
+            raw = _xor_block(raw, self._ne_key, offset)
         return _decompress(raw[:size], raw[size])
 
     def read_block(self, offset: int, size: int) -> bytes | None:
@@ -167,16 +228,17 @@ class LevelDB:
 
     def __init__(self, db_dir):
         db_dir = Path(db_dir)
+        self._ne_key = _netease_key(db_dir)  # 网易加密 key；非网易为 None
         self._files: list[_LdbFile] = []
         for path in sorted(db_dir.glob("*.ldb"), key=lambda p: _file_num(p.name)):
-            f = _LdbFile(path)
+            f = _LdbFile(path, self._ne_key)
             if f.handles:
                 self._files.append(f)
         self._cache: "OrderedDict[tuple[int, int], bytes]" = OrderedDict()
         # .log（WAL）——干净保存时通常为空；按需也读入（小）
         self._log: dict[bytes, bytes] = {}
         for path in sorted(db_dir.glob("*.log"), key=lambda p: _file_num(p.name)):
-            entries, deleted = _read_log_filtered(path)
+            entries, deleted = _read_log_filtered(path, self._ne_key)
             for k in deleted:
                 self._log.pop(k, None)
             for k, v in entries.items():
@@ -255,14 +317,19 @@ class LevelDB:
 # ---------------------------------------------------------------------------
 # .log（WAL）读取
 # ---------------------------------------------------------------------------
-def _read_log_filtered(path) -> tuple[dict[bytes, bytes], set[bytes]]:
-    """读一个 .log（WAL）文件，返回 (entries, deleted)。"""
+def _read_log_filtered(path, ne_key: bytes | None = None) -> tuple[dict[bytes, bytes], set[bytes]]:
+    """读一个 .log（WAL）文件，返回 (entries, deleted)。
+
+    ``ne_key``：网易加密 key；若 .log 带网易头则先解密。
+    """
     entries: dict[bytes, bytes] = {}
     deleted: set[bytes] = set()
     try:
         data = Path(path).read_bytes()
     except OSError:
         return entries, deleted
+    if ne_key and data.startswith(_NE_HEADER):
+        data = _xor_block(data[len(_NE_HEADER):], ne_key, 0)
     n = len(data)
     pos = 0
     frag = b""

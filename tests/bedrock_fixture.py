@@ -278,3 +278,32 @@ def make_bedrock_world(tmp_path: Path) -> Path:
     (world / "level.dat").write_bytes(b"\x08\x00\x00\x00")
     (world / "levelname.txt").write_text("Test Bedrock World", encoding="utf-8")
     return world
+
+
+def make_bedrock_world_netease(tmp_path: Path) -> Path:
+    """网易（NetEase）加密的 Bedrock 世界：.ldb 带 [0x80,0x1D,0x30,0x01] 头 + XOR 加密。
+
+    加密规则（对齐 NetEaseMC-Decryptor）：整个文件（去 4 字节头）用 8 字节 key
+    从偏移 0 起连续 XOR；CURRENT 明文 = ``MANIFEST-XXXX\\n``，据此推导 key。
+    """
+    key = b"12345678"
+    world = Path(tmp_path) / "netease_world"
+    db_dir = world / "db"
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    chunk_data = {}
+    chunk_data.update(_chunk_00())
+    chunk_data.update(_chunk_01())
+    chunk_data.update(_chunk_minus_1_0())
+    plain = _build_ldb(chunk_data)
+    enc = b"\x80\x1d\x30\x01" + bytes(plain[i] ^ key[i % 8] for i in range(len(plain)))
+    (db_dir / "000001.ldb").write_bytes(enc)
+
+    manifest_name = b"MANIFEST-000001"
+    cur_plain = manifest_name + b"\x0a"
+    cur_enc = b"\x80\x1d\x30\x01" + bytes(cur_plain[i] ^ key[i % 8] for i in range(len(cur_plain)))
+    (db_dir / "CURRENT").write_bytes(cur_enc)
+    (db_dir / manifest_name.decode()).write_bytes(b"")
+
+    (world / "level.dat").write_bytes(b"\x08\x00\x00\x00")
+    return world
