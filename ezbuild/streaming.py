@@ -203,11 +203,16 @@ def _txt_lines(source):
 
 
 def _iter_txt_blocks(lines) -> Iterator[tuple[int, int, int, str, dict]]:
-    """从 txt 行迭代产出方块 ``(x, y, z, name, states)``；fill 展开，tp/其它行忽略。"""
+    """从 txt 行迭代产出方块 ``(x, y, z, name, states)``；fill 展开，tp/其它行忽略。
+
+    兼容 Bedrock/MCFunction 命令的 ``/`` 前缀（``/setblock`` / ``/fill``）。
+    """
     for line in lines:
         line = line.strip()
         if not line:
             continue
+        if line.startswith("/"):  # Bedrock 命令前缀
+            line = line[1:]
         if line.startswith("setblock"):  # setblock 最常见，优先判断
             parts = line.split()
             if len(parts) < 4:
@@ -248,6 +253,8 @@ def _scan_txt_bounds(lines):
         line = line.strip()
         if not line:
             continue
+        if line.startswith("/"):  # Bedrock 命令前缀
+            line = line[1:]
         if line.startswith("setblock"):
             parts = line.split()
             if len(parts) < 4:

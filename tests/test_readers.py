@@ -162,6 +162,22 @@ class TestTxtReader:
         assert any(l.startswith("fill") for l in lines)  # red_wool 区域合并成 fill
         assert any("red_wool" in l for l in lines)
 
+    def test_bedrock_slash_prefix(self):
+        """兼容 Bedrock/MCFunction 的 ``/`` 前缀命令。"""
+        sample = "\n".join(
+            [
+                "/titleraw @a actionbar {\"rawtext\":[{\"text\":\"hi\"}]}",
+                "/setblock ~0 ~0 ~0 smooth_stone",
+                "/setblock ~1 ~2 ~3 polished_andesite",
+                "/fill ~2 ~0 ~0 ~3 ~0 ~0 red_wool",
+            ]
+        )
+        b = ezbuild.convert_read_from(sample.encode(), "txt")
+        by_pos = {(blk.x, blk.y, blk.z): blk for blk in b.blocks}
+        assert by_pos[(0, 0, 0)].name == "smooth_stone"
+        assert by_pos[(1, 2, 3)].name == "polished_andesite"
+        assert len([blk for blk in b.blocks if blk.name == "red_wool"]) == 2
+
 
 class TestIbiReader:
     """IBI 导入包 → Building（拆分 txt 段 + 命令方块 JSON 段）。"""

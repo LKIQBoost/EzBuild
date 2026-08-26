@@ -37,11 +37,13 @@ class TxtReader(Reader):
             line = line.strip()
             if not line or line.startswith("tp"):
                 continue
+            if line.startswith("/"):  # Bedrock/MCFunction 命令前缀
+                line = line[1:]
             if line.startswith("setblock"):
                 self._parse_setblock(line, building)
             elif line.startswith("fill"):
                 self._parse_fill(line, building)
-            # 其它行忽略
+            # 其它行（titleraw / tickingarea / 说明等）忽略
 
         self._update_size(building)
         return building
