@@ -137,6 +137,32 @@ class TestTxtWriter:
         # 输出中不应出现超出区块范围的绝对坐标（都是 ~ 相对）
         assert all(l.startswith(("tp", "fill", "setblock")) for l in lines)
 
+    def test_fill_merge_non_consecutive_z(self):
+        """回归：同一种方块在非连续 z 平面重现（中间是空气）时，fill 合并不能丢中间盒子。
+
+        之前 _stitch_rectangles 只遍历有矩形的 z 平面，z=1 与 z=3 的矩形被当成
+        "延续"，中间的 z=1 盒子整体丢失（漏方块）。
+        """
+        from ezbuild.writers.txt import chunk_optimize
+
+        # 两层 red_wool（z=1 和 z=3 各一个 2×1×1 平面，z=2 是空气），中间隔开
+        blocks = {
+            (0, 0, 1): ("red_wool", ""), (1, 0, 1): ("red_wool", ""),
+            (0, 0, 3): ("red_wool", ""), (1, 0, 3): ("red_wool", ""),
+        }
+        text = chunk_optimize(blocks, chunk_size=16)
+        # 统计输出覆盖的方块数（fill 按体积展开 + setblock）
+        lines = [l for l in text.splitlines() if l.strip()]
+        n = 0
+        for l in lines:
+            if l.startswith("fill "):
+                parts = l.split()
+                x1, y1, z1, x2, y2, z2 = (int(float(p[1:])) for p in parts[1:7])
+                n += (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1) * (abs(z2 - z1) + 1)
+            elif l.startswith("setblock "):
+                n += 1
+        assert n == 4  # 4 个方块一个都不能丢
+
     def test_nofill_disables_fill_merge(self):
         """fill_merge=False（--nofill）：分区块保留，但全部输出 setblock。"""
         from ezbuild.writers.txt import chunk_optimize

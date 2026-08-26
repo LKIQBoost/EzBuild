@@ -276,6 +276,10 @@ def _stitch_rectangles(
 
     当前 Z 出现与上一层**同一矩形** → 盒子 z 范围延长；否则新开盒子。
     返回 ``[(x1, y1, z1, x2, y2, z2), ...]``。
+
+    注意：只遍历有矩形的 Z 平面（中间层为空气时不在此 dict）。若同一矩形在
+    非连续 Z 重现（如 z=1 与 z=3，z=2 无此矩形），必须先关闭旧盒子再开新盒子，
+    否则中间的盒子会整个丢失（漏方块）。
     """
     boxes: list[tuple[int, int, int, int, int, int]] = []
     active: dict[tuple[int, int, int, int], tuple[int, int]] = {}  # rect -> (z_start, z_end)
@@ -286,6 +290,10 @@ def _stitch_rectangles(
             if prev is not None and prev[1] == z - 1:
                 still_active[rect] = (prev[0], z)  # 缝合成功：保持 z_start，延长 z_end
             else:
+                if prev is not None:
+                    # 非连续 Z 重现：先关闭旧盒子（避免 z_start 被覆盖丢失）
+                    x1, y1, x2, y2 = rect
+                    boxes.append((x1, y1, prev[0], x2, y2, prev[1]))
                 still_active[rect] = (z, z)  # 新开启盒子
         # 关闭不再延续的 active 矩形
         for rect, (z_start, z_end) in active.items():
