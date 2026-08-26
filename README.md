@@ -121,19 +121,19 @@ python main.py schematic -i 巨型建筑.bdx -c      # 经典 Java .schematic �
 
 ```bash
 # 导出包围盒内的建筑为 Sponge .schem（Offset 保留世界坐标）。
-# 坐标用 WorldEdit 风格：-pos1 x y z -pos2 x y z（含端点，可反着给自动取 min/max）
-python main.py schem -i 世界文件夹 -pos1 100 -64 200 -pos2 150 100 250
+# 坐标用 -pos x1 y1 z1 x2 y2 z2（起始与结束 xyz，含端点，可反着给自动取 min/max）
+python main.py schem -i 世界文件夹 -pos 100 -64 200 150 100 250
 
 # 基岩版 .mcstructure（structure_world_origin 保留世界坐标）
-python main.py mcstructure -i 世界文件夹 -pos1 100 -64 200 -pos2 150 100 250
+python main.py mcstructure -i 世界文件夹 -pos 100 -64 200 150 100 250
 
 # txt / IBI / 命令方块 JSON
-python main.py txt -i 世界文件夹 -pos1 100 -64 200 -pos2 150 100 250
-python main.py ibi -i 世界文件夹 -pos1 100 -64 200 -pos2 150 100 250
-python main.py cmd_json -i 世界文件夹 -pos1 100 -64 200 -pos2 150 100 250
+python main.py txt -i 世界文件夹 -pos 100 -64 200 150 100 250
+python main.py ibi -i 世界文件夹 -pos 100 -64 200 150 100 250
+python main.py cmd_json -i 世界文件夹 -pos 100 -64 200 150 100 250
 
-# -o 指定输出路径；旧写法 --x1 --y1 --z1 --x2 --y2 --z2 仍兼容
-python main.py schem -i 世界文件夹 -pos1 150 100 250 -pos2 100 -64 200 -o 建筑.schem
+# -o 指定输出路径；前后两点可反着给（自动取 min/max）
+python main.py schem -i 世界文件夹 -pos 150 100 250 100 -64 200 -o 建筑.schem
 ```
 
 **性能与内存**：txt / ibi / cmd_json 逐区块流式转换——Java 只解压包围盒相交的
@@ -147,7 +147,7 @@ region 文件；Bedrock 用自带的极简 LevelDB 读取器（`ezbuild/leveldb.
 实测 4 进程比单进程快 ~2.8 倍，输出逐字节一致。进度条：纯 setblock 显示已生成
 方块数；schem 显示「扫描边界 / 填充数组」区块进度。
 
-> 注意：如果 `-pos1/-pos2` 框住**整个世界**（例如几千格跨度、地形密布），
+> 注意：如果 `-pos` 框住**整个世界**（例如几千格跨度、地形密布），
 > 导出的 schem 本身就接近 GB 级（BlockData 按体积算），属格式固有；建议只框
 > 要导出的建筑范围，或用 txt / ibi 流式格式。
 >
@@ -155,7 +155,7 @@ region 文件；Bedrock 用自带的极简 LevelDB 读取器（`ezbuild/leveldb.
 > 种类超过 256（如整世界地形+矿石+建筑混在一起，实测 600×600 就有 600+ 种），
 > 加 `-s` 会自动沿 x/z 轴递归拆分成多个 `<输出名>_1.schem`、`_2.schem`…
 > 每个分块调色板 ≤256，Offset 保留各自的世界坐标，可直接拼回原位：
-> `python main.py schem -i 世界文件夹 -pos1 100 -64 200 -pos2 1500 100 1800 -s`
+> `python main.py schem -i 世界文件夹 -pos 100 -64 200 1500 100 1800 -s`
 
 ### 作为库使用
 

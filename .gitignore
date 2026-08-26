@@ -12,3 +12,7 @@ wheels/
 
 # 临时调试文件
 _strings_dump.txt
+
+# 项目内临时目录（测试/调试用，用完即删）
+.scratch/
+.pytest-tmp/

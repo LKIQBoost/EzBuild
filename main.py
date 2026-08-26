@@ -30,7 +30,7 @@ def cmd_list(_args) -> int:
         print(f"  {name:<14} {exts:<20} {cls.description}")
     # 世界文件夹不是文件（无扩展名），按目录识别，单独列出
     print(f"  {'world':<14} {'(文件夹)':<20} "
-          f"Minecraft 世界文件夹（Java region/ 或 Bedrock db/，-pos1 x y z -pos2 x y z 框包围盒）")
+          f"Minecraft 世界文件夹（Java region/ 或 Bedrock db/，-pos x1 y1 z1 x2 y2 z2 框包围盒）")
     print("\n输出格式（Writer）:")
     for name in registry.list_writers():
         cls = registry.get_writer(name)
@@ -167,20 +167,9 @@ def _convert_world(src: str, args: argparse.Namespace) -> tuple[str, str]:
     """
     start = time.monotonic()
     to_format = args.format
-    # 坐标：-pos1/-pos2（WorldEdit 风格）优先，其次 --x1..--z2（兼容旧写法）
-    if args.pos1 is not None or args.pos2 is not None:
-        if args.pos1 is None or args.pos2 is None:
-            raise ValueError("世界导出需要成对坐标：-pos1 x y z 与 -pos2 x y z")
-        x1, y1, z1 = args.pos1
-        x2, y2, z2 = args.pos2
-    else:
-        coords_old = (args.x1, args.y1, args.z1, args.x2, args.y2, args.z2)
-        if any(c is None for c in coords_old):
-            raise ValueError(
-                "世界导出需要完整坐标范围：-pos1 x y z -pos2 x y z（或旧写法 --x1 --y1 --z1 --x2 --y2 --z2）"
-            )
-        x1, y1, z1, x2, y2, z2 = coords_old
-    coords = (x1, y1, z1, x2, y2, z2)
+    if args.pos is None:
+        raise ValueError("世界导出需要坐标：-pos x1 y1 z1 x2 y2 z2（起始与结束 xyz）")
+    coords = tuple(args.pos)
 
     from ezbuild.world import (
         world_to_cmd_json,
@@ -490,30 +479,15 @@ def main(argv=None) -> int:
              "（txt 的 DLL 输出是绝对坐标指令文件，与 Python 分区块 txt 不同），"
              "并额外解锁 bdx/schematic/litematic/mcfn/axiombp/fuhong 输出格式",
     )
-    # 世界导出：-i 指向世界文件夹时需给出包围盒坐标（世界坐标，含端点）。
-    # -pos1/-pos2（WorldEdit 风格，各接 3 个数）优先；旧写法 --x1..--z2 兼容。
+    # 世界导出：-i 指向世界文件夹时需给出包围盒坐标 -pos x1 y1 z1 x2 y2 z2（世界坐标，含端点）
     parser.add_argument(
-        "-pos1",
-        "--pos1",
-        nargs=3,
+        "-pos",
+        "--pos",
+        nargs=6,
         type=int,
-        metavar=("X", "Y", "Z"),
-        help="世界导出起始坐标（-pos1 x y z）",
+        metavar=("X1", "Y1", "Z1", "X2", "Y2", "Z2"),
+        help="世界导出包围盒坐标（-pos x1 y1 z1 x2 y2 z2，起始与结束 xyz，含端点）",
     )
-    parser.add_argument(
-        "-pos2",
-        "--pos2",
-        nargs=3,
-        type=int,
-        metavar=("X", "Y", "Z"),
-        help="世界导出结束坐标（-pos2 x y z）",
-    )
-    parser.add_argument("--x1", "--x-min", type=int, metavar="X", help="世界导出起始 x 坐标（旧写法，建议用 -pos1）")
-    parser.add_argument("--y1", "--y-min", type=int, metavar="Y", help="世界导出起始 y 坐标（旧写法，建议用 -pos1）")
-    parser.add_argument("--z1", "--z-min", type=int, metavar="Z", help="世界导出起始 z 坐标（旧写法，建议用 -pos1）")
-    parser.add_argument("--x2", "--x-max", type=int, metavar="X", help="世界导出结束 x 坐标（旧写法，建议用 -pos2）")
-    parser.add_argument("--y2", "--y-max", type=int, metavar="Y", help="世界导出结束 y 坐标（旧写法，建议用 -pos2）")
-    parser.add_argument("--z2", "--z-max", type=int, metavar="Z", help="世界导出结束 z 坐标（旧写法，建议用 -pos2）")
     parser.add_argument(
         "-s",
         "--split",
