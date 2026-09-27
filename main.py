@@ -40,6 +40,33 @@ def cmd_list(_args) -> int:
     return 0
 
 
+def cmd_world_decrypt(args: argparse.Namespace) -> int:
+    """``world`` 模式：仅解密网易（NetEase）加密存档，输出解密后的存档文件夹。
+
+    用法：``python main.py world -i <存档文件夹> [-o <输出文件夹>]``
+    """
+    import shutil
+
+    if not args.input or len(args.input) != 1:
+        raise ValueError("world 解密需要且仅需要一个存档文件夹：-i <存档>")
+    src = Path(args.input[0])
+    if not src.is_dir():
+        raise FileNotFoundError(f"存档文件夹不存在: {src}")
+    dst = Path(args.output) if args.output else Path(str(src) + "_解密")
+
+    from ezbuild.leveldb import decrypt_world_folder
+
+    key, n_dec, n_copy = decrypt_world_folder(src, dst)
+    if key is None:
+        print(f"[world] {src} 不是网易加密存档（无需解密），已按原样复制到: {dst}")
+        return 0
+    print(f"[world] 解密完成，key = {key.decode('ascii', errors='replace')}")
+    print(f"       解密 {n_dec} 个文件，原样复制 {n_copy} 个 db 文件")
+    print(f"       输出存档: {dst}")
+    print(f"       现在可用标准 Bedrock 工具/本工具 -pos 导出读取该存档")
+    return 0
+
+
 def _read_building(src: str) -> ezbuild.Building | ezbuild.Song:
     """读取一个建筑或音乐文件（按扩展名自动识别）。"""
     return ezbuild.convert_read(src)
@@ -500,6 +527,8 @@ def main(argv=None) -> int:
 
     if args.list:
         return cmd_list(args)
+    if args.format == "world":  # 仅解密存档（网易加密 → 普通存档）
+        return cmd_world_decrypt(args)
     if args.input:
         if not args.format:
             parser.error(

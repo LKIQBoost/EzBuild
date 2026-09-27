@@ -44,6 +44,44 @@ def _xor_block(data: bytes, key: bytes, start_pos: int) -> bytes:
     return np.bitwise_xor(arr, key_arr).tobytes()
 
 
+def decrypt_world_folder(src, dst) -> tuple[bytes | None, int, int]:
+    """把网易加密存档解密为普通存档，返回 ``(key, 解密文件数, 原样复制数)``。
+
+    复制整个存档文件夹（level.dat / db / 其它）；db 内带网易头
+    ``[0x80,0x1D,0x30,0x01]`` 的文件去头 + XOR 解密，其余原样复制。
+    非网易存档（key 为 None）同样整夹复制，只是不解密任何文件。
+    """
+    import shutil
+
+    src = Path(src)
+    dst = Path(dst)
+    key = _netease_key(src / "db")
+    dst.mkdir(parents=True, exist_ok=True)
+    n_dec = 0
+    n_copy = 0
+    for item in src.iterdir():
+        if item.is_dir():
+            target = dst / item.name
+            if item.name == "db" and key:
+                target.mkdir(parents=True, exist_ok=True)
+                for f in item.iterdir():
+                    if f.is_dir():
+                        shutil.copytree(f, target / f.name, dirs_exist_ok=True)
+                        continue
+                    data = f.read_bytes()
+                    if data.startswith(_NE_HEADER):
+                        (target / f.name).write_bytes(_xor_block(data[len(_NE_HEADER):], key, 0))
+                        n_dec += 1
+                    else:
+                        shutil.copy2(f, target / f.name)
+                        n_copy += 1
+            else:
+                shutil.copytree(item, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dst / item.name)
+    return key, n_dec, n_copy
+
+
 def _netease_key(db_dir) -> bytes | None:
     """检测并推导网易加密 key；非网易存档返回 None。
 
