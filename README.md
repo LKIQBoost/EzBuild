@@ -60,6 +60,12 @@ python main.py mcstructure -i 巨型建筑.schem
 python main.py schem -i 巨型建筑.schem
 python main.py cmd_json -i 巨型建筑.schematic
 
+# mcstructure → 分区块 txt 同样走流式（不建 Building 模型，输出逐字节一致）。
+# block_indices 用 nbt_lite 走 numpy 批量解析（不逐元素建对象）：
+# 实测 27MB / 347 万元素 ~0.3s、峰值内存 ~41MB
+python main.py txt -i 巨型建筑.mcstructure
+python main.py txt -i 巨型建筑.mcstructure --nofill   # 纯 setblock（可分 -t 并行）
+
 # txt → txt 分区块同样走流式（不建 Building 模型，直接按区块分组逐行写出）；
 # --nofill 则读一行写一行。大文件内存与耗时约为 Building 路径的 1/2~1/3
 python main.py txt -i 未分区块的巨型.txt
@@ -204,6 +210,8 @@ ezbuild/
 │   ├── song.py          # 中立音乐模型：Song / Note / Layer + 乐器映射表
 │   ├── registry.py      # 格式注册表与按扩展名分发
 │   ├── utils.py         # nbtlib 转换 / 方块名规范化 / 状态字符串解析
+│   ├── nbt_lite.py      # 极简 NBT 解析：大数组走 numpy 批量读（mcstructure 用）
+│   ├── streaming.py     # 增量（流式）转换：schem/schematic/mcstructure → 建筑格式
 │   ├── world.py         # 世界文件夹导出（包围盒 → 建筑，流式逐区块；自动识别版本）
 │   ├── bedrock.py       # Bedrock 世界源：LevelDB 子区块 v1/v8/v9 解码 + 方块实体
 │   ├── leveldb.py       # 极简 LevelDB 读取器（.ldb/.log，选择性解压，zlib）

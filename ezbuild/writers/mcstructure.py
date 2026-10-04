@@ -24,7 +24,7 @@ from typing import Any
 import nbtlib
 from nbtlib.tag import Byte, Compound, Int, IntArray, List, Short, String
 
-from ..model import Building, CommandBlock, COMMAND_BLOCK_MODES
+from ..model import Building, CommandBlock, COMMAND_BLOCK_IDS, COMMAND_BLOCK_MODES
 from .base import Writer
 
 # 与官方模板一致的方块版本号
@@ -142,7 +142,7 @@ class McStructureWriter(Writer):
 
                 cells[pos] = Block(
                     x=cb.x, y=cb.y, z=cb.z,
-                    name=COMMAND_BLOCK_MODES[cb.mode],
+                    name=COMMAND_BLOCK_IDS[cb.mode],
                     states={"facing_direction": 3},
                 )
         return cells

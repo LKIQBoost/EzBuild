@@ -21,6 +21,7 @@ from typing import Callable, Iterator, Union
 import nbtlib
 import numpy as np
 
+from . import nbt_lite
 from .model import Block, CommandBlock, COMMAND_BLOCK_IDS, COMMAND_BLOCK_MODES, MODE_IMPULSE
 from .readers.base import Source
 from .readers.schem import _as_uint8, _parse_blockstate
@@ -121,7 +122,7 @@ def schematic_to_txt(
     progress: bool = False,
     workers: int | None = None,
 ):
-    """流式把 Sponge .schem 或经典 .schematic 渲染为 txt，增量写入 ``output``。
+    """流式把 Sponge .schem / 经典 .schematic / 基岩 .mcstructure 渲染为 txt。
 
     ``fill_merge=True``：分区块（16×16 + tp 导航 + fill 合并，单进程）；
     ``fill_merge=False``（--nofill）：纯 setblock（无 tp/分块），大文件或 ``-t`` 时共享内存并行。
@@ -188,6 +189,8 @@ def schematic_to_txt(
 
 # 向后兼容别名（schem_to_txt 现在也接受经典 .schematic）
 schem_to_txt = schematic_to_txt
+# mcstructure → 分区块 txt 复用同一入口（按 NBT 字节序自动识别格式）
+mcstructure_to_txt = schematic_to_txt
 
 
 # ---------------------------------------------------------------------------
@@ -458,16 +461,21 @@ def iter_schematic_txt_lines(
             data = f.read()
     if data[:2] == b"\x1f\x8b":  # gzip 魔数
         data = gzip.decompress(data)
-    schem = nbtlib.File.parse(io.BytesIO(data), byteorder="big")
+    root, kind = _load_structure(data)
 
-    if "Palette" in schem:
+    if kind == "mcstructure":
+        yield from _iter_mcstructure_lines(
+            root, chunk_size=chunk_size, fill_merge=fill_merge,
+            strip_states=strip_states, progress=progress,
+        )
+    elif "Palette" in root:
         yield from _iter_sponge_lines(
-            schem, chunk_size=chunk_size, fill_merge=fill_merge,
+            root, chunk_size=chunk_size, fill_merge=fill_merge,
             strip_states=strip_states, progress=progress,
         )
     else:
         yield from _iter_classic_lines(
-            schem, chunk_size=chunk_size, fill_merge=fill_merge,
+            root, chunk_size=chunk_size, fill_merge=fill_merge,
             strip_states=strip_states, progress=progress,
         )
 
@@ -943,6 +951,123 @@ def _iter_sponge_lines(
 
 
 # ---------------------------------------------------------------------------
+# 流式 mcstructure（基岩版结构文件，小端 NBT）
+# ---------------------------------------------------------------------------
+def _load_structure(data: bytes):
+    """解析结构文件 NBT，自动识别格式。
+
+    返回 ``(root, kind)``，``kind`` ∈ ``{"schem", "mcstructure"}``：
+    - 小端、根下首键为 ``format_version`` → mcstructure，用 :mod:`nbt_lite`
+      解析（大数组走 numpy 批量读，不逐元素建对象，内存/耗时降一个量级）；
+    - 否则按大端 schem/schematic 用 nbtlib 解析（含 ``Palette``/``Blocks``）。
+
+    mcstructure 的 root 是**普通 dict**（非 nbtlib 标签），按 dict 访问。
+    """
+    if nbt_lite.root_first_key(data, "little") == "format_version":
+        return nbt_lite.parse_nbt(data, "little"), "mcstructure"
+    try:
+        root = nbtlib.File.parse(io.BytesIO(data), byteorder="big")
+        if "Palette" in root or "Blocks" in root:
+            return root, "schem"
+    except Exception:
+        pass
+    return nbt_lite.parse_nbt(data, "little"), "mcstructure"
+
+
+def _mcstructure_array(root):
+    """解析 mcstructure，返回 ``((X, Y, Z), array3, parsed, default)``。
+
+    - ``array3``: ``(H, L, W)`` = ``(Y, Z, X)`` 调色板索引 + 1 数组
+      （空气/未用 → 0，保证非负，兼容 ``bincount``）。
+    - ``parsed``: ``{数组值: (方块名, 状态 dict)}``（不含空气）。
+    - ``default``: ``palette.default`` Compound（含 ``block_position_data``）。
+    索引公式 ``idx = z + y*Z + x*Y*Z``（x 最外、z 最快）。
+    """
+    X, Y, Z = (int(v) for v in root["size"])
+    default = root["structure"]["palette"]["default"]
+    palette = default["block_palette"]
+    parsed: dict[int, tuple[str, dict]] = {}
+    air_ids: list[int] = []
+    for i, entry in enumerate(palette):
+        name = normalize_block_name(str(entry.get("name", "") or ""))
+        if not name or name == "air":
+            air_ids.append(i)
+            continue
+        states = entry.get("states") or {}
+        if not isinstance(states, dict):  # 兼容 nbtlib 标签
+            states = tag_to_python(states) or {}
+        parsed[i + 1] = (name, dict(states))
+
+    total = X * Y * Z
+    # block_indices[0] 已是 numpy 数组（nbt_lite 批量解析），asarray 廉价
+    indices = np.asarray(root["structure"]["block_indices"][0], dtype=np.int32)
+    indices = indices[:total]
+    if indices.size < total:
+        indices = np.pad(indices, (0, total - indices.size), constant_values=-1)
+    indices = indices + 1  # -1（空气）→ 0
+    for ai in air_ids:
+        indices[indices == ai + 1] = 0
+    array3 = indices.reshape(X, Y, Z).transpose(1, 2, 0)  # (Y, Z, X) = (H, L, W)
+    return (X, Y, Z), array3, parsed, default
+
+
+def _iter_mcstructure_lines(
+    root,
+    *,
+    chunk_size: int,
+    fill_merge: bool,
+    strip_states: frozenset | None,
+    progress: bool,
+) -> Iterator[str]:
+    """流式把 mcstructure 渲染为分区块 txt（逐区块，不建 Building 模型）。"""
+    (X, Y, Z), bd3, parsed, _default = _mcstructure_array(root)
+    W, H, L = X, Y, Z
+    if W <= 0 or H <= 0 or L <= 0 or bd3.size == 0:
+        return
+    parsed_str = {
+        idx: (name, format_block_states(states, strip_states) if states else "")
+        for idx, (name, states) in parsed.items()
+    }
+    air = 0
+    anycol = np.any(bd3 != air, axis=0)  # (L, W) 是否有非空气
+    zs, xs = np.nonzero(anycol)
+    if len(zs) == 0:
+        return
+    min_x, max_x = int(xs.min()), int(xs.max())
+    min_z, max_z = int(zs.min()), int(zs.max())
+    chunks = _divide_chunks(min_x, max_x, min_z, max_z, chunk_size)
+    total_blocks = 0
+    if progress:
+        counts = np.bincount(bd3.ravel())
+        total_blocks = int(bd3.size - counts[air])
+
+    def get_region(sx, ex, sz, ez):
+        rx0, rx1 = max(sx, 0), min(ex, W - 1)
+        rz0, rz1 = max(sz, 0), min(ez, L - 1)
+        if rx0 > rx1 or rz0 > rz1:
+            return {}
+        # 转置为 (x, y, z) 再取非零：与读取器（for x: for y: for z:）同序，
+        # 保证 _optimize_region 按类型分组顺序一致 → 分区块 txt 逐字节一致。
+        col = bd3[:, rz0:rz1 + 1, rx0:rx1 + 1].transpose(2, 0, 1)
+        mask = col != air
+        xs, ys, zs = np.nonzero(mask)
+        if len(xs) == 0:
+            return {}
+        vals = col[xs, ys, zs]
+        region = {}
+        for x, y, z, v in zip(xs.tolist(), ys.tolist(), zs.tolist(), vals.tolist()):
+            item = parsed_str.get(v)
+            if item is None:
+                continue
+            region[(x, y, z)] = item
+        return region
+
+    yield from _iter_chunk_lines(
+        chunks, chunk_size, fill_merge, strip_states, progress, total_blocks, get_region
+    )
+
+
+# ---------------------------------------------------------------------------
 # SchematicSource：统一流式方块源（不建 Building 模型）
 # ---------------------------------------------------------------------------
 class SchematicSource:
@@ -964,8 +1089,10 @@ class SchematicSource:
                 data = f.read()
         if data[:2] == b"\x1f\x8b":
             data = gzip.decompress(data)
-        root = nbtlib.File.parse(io.BytesIO(data), byteorder="big")
-        if "Palette" in root:
+        root, kind = _load_structure(data)
+        if kind == "mcstructure":
+            self._init_mcstructure(root)
+        elif "Palette" in root:
             self._init_sponge(root)
         else:
             self._init_classic(root)
@@ -993,6 +1120,8 @@ class SchematicSource:
                         constant_values=self.air if self.air is not None else 0)
         self.array3 = bd.reshape(self.H, self.L, self.W)
         self._entities = root.get("BlockEntities")
+        self._position_data = None
+        self._is_mcstructure = False
 
     def _init_classic(self, root):
         self.W, self.H, self.L = (
@@ -1022,6 +1151,19 @@ class SchematicSource:
             combined |= data.astype(np.uint16)
         self.array3 = combined.reshape(self.H, self.L, self.W)
         self._entities = root.get("TileEntities")
+        self._position_data = None
+        self._is_mcstructure = False
+
+    def _init_mcstructure(self, root):
+        """mcstructure（小端）：调色板索引 + 1（空气 → 0），方块实体在 position_data。"""
+        (X, Y, Z), self.array3, self.parsed, default = _mcstructure_array(root)
+        self.W, self.H, self.L = X, Y, Z
+        # 读取器（readers/mcstructure.py）忽略 structure_world_origin → 与之一致用相对坐标
+        self.ox = self.oy = self.oz = 0
+        self.air = 0
+        self._entities = None
+        self._position_data = default.get("block_position_data")
+        self._is_mcstructure = True
 
     # ---------------- 迭代 ----------------
     @property
@@ -1048,7 +1190,14 @@ class SchematicSource:
             yield (x0 + xl + self.ox, y + self.oy, z0 + zl + self.oz, item[0], item[1])
 
     def iter_all_blocks(self):
-        """yield (绝对x, y, 绝对z, name, 格式化状态串)；按 y 分块迭代。"""
+        """yield (绝对x, y, 绝对z, name, 格式化状态串)。
+
+        schem/schematic 按 y 分块迭代；mcstructure 按读取器顺序（x 主序）迭代，
+        保证 ``--nofill`` 输出与「格式 → Building → txt」逐字节一致。
+        """
+        if self._is_mcstructure:
+            yield from self._iter_all_blocks_mcstructure()
+            return
         for y0 in range(0, self.H, 64):
             col = self.array3[y0:y0 + 64, :, :]
             mask = col != self.air
@@ -1060,8 +1209,24 @@ class SchematicSource:
                     continue
                 yield (x + self.ox, y0 + y + self.oy, z + self.oz, item[0], item[1])
 
+    def _iter_all_blocks_mcstructure(self):
+        """mcstructure：按 ``for x: for y: for z``（x 主序）迭代，对齐读取器顺序。"""
+        arr_xyz = self.array3.transpose(2, 0, 1)  # (W, H, L) = (x, y, z)
+        mask = arr_xyz != self.air
+        xs, ys, zs = np.nonzero(mask)
+        vals = arr_xyz[xs, ys, zs]  # 批量取值，避免逐格 numpy 标量
+        for x, y, z, v in zip(xs.tolist(), ys.tolist(), zs.tolist(), vals.tolist()):
+            item = self._entries.get(v)
+            if item is None:
+                continue
+            yield (x + self.ox, y + self.oy, z + self.oz, item[0], item[1])
+
     def command_blocks(self):
-        """yield CommandBlock（从 BlockEntities/TileEntities）。"""
+        """yield CommandBlock（schem/schematic 从 BlockEntities/TileEntities，
+        mcstructure 从 ``block_position_data``）。"""
+        if self._position_data is not None:
+            yield from self._command_blocks_position_data()
+            return
         if self._entities is None:
             return
         for be_tag in self._entities:
@@ -1085,6 +1250,30 @@ class SchematicSource:
             yield _command_block_from_entity(
                 x=rx + self.ox, y=ry + self.oy, z=rz + self.oz,
                 name=name, states=item[1], be=be,
+            )
+
+    def _command_blocks_position_data(self):
+        """mcstructure：从 ``block_position_data``（键 = 扁平索引）产出命令方块。"""
+        W, H, L = self.W, self.H, self.L
+        yz = H * L
+        for idx_str, entry in self._position_data.items():
+            try:
+                flat = int(idx_str)
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= flat < W * yz:
+                continue
+            x, rem = divmod(flat, yz)
+            y, z = divmod(rem, L)
+            item = self.parsed.get(int(self.array3[y, z, x]))
+            if item is None or item[0] not in COMMAND_BLOCK_MODES:
+                continue
+            be_tag = entry.get("block_entity_data")
+            if be_tag is None:
+                continue
+            yield _command_block_from_entity(
+                x=x + self.ox, y=y + self.oy, z=z + self.oz,
+                name=item[0], states=item[1], be=be_tag,
             )
 
 

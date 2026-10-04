@@ -263,3 +263,30 @@ def test_bdx_to_cmd_json(tmp_path):
     by_pos = {(e["posx"], e["posy"], e["posz"]): e for e in entries}
     assert by_pos[("~1", "~0", "~0")]["Command"] == "say impulse"
     assert by_pos[("~2", "~0", "~0")]["BlockMode"] == "chain_command_block"
+
+
+class TestMcStructureWriter:
+    def test_command_block_without_matching_block(self):
+        """回归：命令方块没有对应 Block 时也要能写出。
+
+        曾误用 ``COMMAND_BLOCK_MODES[cb.mode]``（name→mode 表按 mode 取）导致 KeyError。
+        """
+        from ezbuild.model import (
+            MODE_CHAIN,
+            MODE_IMPULSE,
+            MODE_REPEAT,
+            Building,
+            CommandBlock,
+        )
+
+        b = Building()
+        for i, mode in enumerate((MODE_IMPULSE, MODE_CHAIN, MODE_REPEAT)):
+            b.command_blocks.append(
+                CommandBlock(x=i, y=0, z=0, mode=mode, command=f"say {i}", needs_redstone=True)
+            )
+        data = ezbuild.registry.get_writer("mcstructure")().render(b)
+        back = ezbuild.convert_read_from(data, "mcstructure")
+        assert {blk.name for blk in back.blocks} == {
+            "command_block", "chain_command_block", "repeating_command_block"
+        }
+        assert {c.mode for c in back.command_blocks} == {MODE_IMPULSE, MODE_CHAIN, MODE_REPEAT}

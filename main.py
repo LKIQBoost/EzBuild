@@ -267,9 +267,10 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
         if result is not None:
             return result
 
-    # schem / schematic -> 建筑格式：流式增量转换，避免巨型结构载入整座建筑占满内存
+    # schem / schematic / mcstructure -> 建筑格式：流式增量转换，避免巨型结构载入整座建筑占满内存
+    # （mcstructure 目前仅「分区块 txt」走流式，其余输出仍走 Building 模型）
     src_fmt = registry.format_for_path(src)
-    if src_fmt in ("schem", "schematic"):
+    if src_fmt in ("schem", "schematic", "mcstructure"):
         from ezbuild.streaming import (
             schematic_to_cmd_json,
             schematic_to_ibi,
@@ -278,13 +279,18 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
             schematic_to_txt,
         )
 
-        _STREAMING = {
-            "txt": (schematic_to_txt, {"fill_merge": True, "strip_states": None}),
-            "ibi": (schematic_to_ibi, {"strip_states": None}),
-            "mcstructure": (schematic_to_mcstructure, {}),
-            "schem": (schematic_to_schem, {}),
-            "cmd_json": (schematic_to_cmd_json, {}),
-        }
+        if src_fmt == "mcstructure":
+            _STREAMING = {
+                "txt": (schematic_to_txt, {"fill_merge": True, "strip_states": None}),
+            }
+        else:
+            _STREAMING = {
+                "txt": (schematic_to_txt, {"fill_merge": True, "strip_states": None}),
+                "ibi": (schematic_to_ibi, {"strip_states": None}),
+                "mcstructure": (schematic_to_mcstructure, {}),
+                "schem": (schematic_to_schem, {}),
+                "cmd_json": (schematic_to_cmd_json, {}),
+            }
         if to_format in _STREAMING:
             fn, kwargs = _STREAMING[to_format]
             kwargs = dict(kwargs)

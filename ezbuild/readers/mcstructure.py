@@ -5,11 +5,10 @@
 
 from __future__ import annotations
 
-import io
+from pathlib import Path
 from typing import Any
 
-import nbtlib
-
+from .. import nbt_lite
 from ..model import Block, Building, CommandBlock, COMMAND_BLOCK_MODES
 from ..utils import tag_to_python
 from .base import Reader, Source
@@ -46,21 +45,23 @@ class MCStructureReader(Reader):
 
     def read(self, source: Source) -> Building:
         if isinstance(source, (bytes, bytearray)):
-            structure = nbtlib.File.parse(io.BytesIO(bytes(source)), byteorder="little")
+            data = bytes(source)
         else:
-            structure = nbtlib.load(source, byteorder="little")
+            data = Path(source).read_bytes()
+        # nbt_lite：block_indices（数百万元素的 List[Int]）走 numpy 批量读，
+        # 比 nbtlib 逐元素建对象省一个量级的内存与时间
+        structure = nbt_lite.parse_nbt(data, "little")
 
-        size_tag = structure["size"]
-        size = tuple(int(v) for v in tag_to_python(size_tag))  # (X, Y, Z)
+        size = tuple(int(v) for v in structure["size"])  # (X, Y, Z)
         X, Y, Z = size
 
         palette = structure["structure"]["palette"]["default"]
         block_palette = palette["block_palette"]
-        block_position_data = palette.get("block_position_data", nbtlib.tag.Compound({}))
+        block_position_data = palette.get("block_position_data") or {}
         block_indices = structure["structure"]["block_indices"][0]
 
         building = Building(size=size, source_format=self.format_name)
-        indices = tag_to_python(block_indices)
+        indices = block_indices  # numpy 数组
 
         for x in range(X):
             for y in range(Y):
@@ -76,8 +77,8 @@ class MCStructureReader(Reader):
                     if not block_name or block_name == "air":
                         continue
 
-                    states = tag_to_python(block_tag.get("states", nbtlib.tag.Compound({})))
-                    entity_tag = block_position_data.get(str(idx), nbtlib.tag.Compound({})).get(
+                    states = tag_to_python(block_tag.get("states") or {})
+                    entity_tag = (block_position_data.get(str(idx)) or {}).get(
                         "block_entity_data"
                     )
                     entity = tag_to_python(entity_tag) if entity_tag is not None else None

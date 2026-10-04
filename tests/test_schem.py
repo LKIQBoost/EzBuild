@@ -234,3 +234,75 @@ class TestStreaming:
         schematic_to_schem(data, out)
         stream = ezbuild.convert_read(out)
         assert _same_content(stream, non)
+
+
+class TestMcStructureStreaming:
+    """mcstructure → 分区块 txt 的流式转换（不建 Building 模型）。"""
+
+    @staticmethod
+    def _mcstructure_bytes(b: Building) -> bytes:
+        return ezbuild.registry.get_writer("mcstructure")().render(b)
+
+    @pytest.mark.parametrize("kwargs", [
+        {},                                     # 分区块默认
+        {"strip_states": frozenset()},          # --all-states
+        {"fill_merge": False},                  # --nofill
+        {"fill_merge": False, "strip_states": frozenset()},
+    ])
+    def test_streaming_matches_non_streaming(self, tmp_path, kwargs):
+        """mcstructure → txt 流式输出与非流式逐字节一致。"""
+        from ezbuild.streaming import schematic_to_txt
+
+        b = _make_building()
+        data = self._mcstructure_bytes(b)
+        bld = ezbuild.convert_read_from(data, "mcstructure")
+        non_stream = ezbuild.registry.get_writer("txt")(progress=False, **kwargs).render(bld)
+
+        out = tmp_path / "s.txt"
+        schematic_to_txt(data, out, progress=False, **kwargs)
+        assert out.read_text(encoding="utf-8") == non_stream
+
+    def test_streaming_large_matches(self, tmp_path):
+        """跨多区块 + 大调色板：区块内迭代顺序须与读取器（x 主序）一致。"""
+        import random
+
+        from ezbuild.streaming import schematic_to_txt
+
+        rng = random.Random(7)
+        names = [f"block_{i}" for i in range(40)]  # 调色板 > 16
+        b = Building()
+        for _ in range(3000):
+            b.blocks.append(
+                Block(x=rng.randint(-20, 60), y=rng.randint(0, 40), z=rng.randint(-20, 60),
+                      name=rng.choice(names),
+                      states={"facing_direction": rng.randint(0, 5)} if rng.random() < 0.4 else {})
+            )
+        data = self._mcstructure_bytes(b)
+        bld = ezbuild.convert_read_from(data, "mcstructure")
+        for kwargs in ({}, {"strip_states": frozenset()}, {"fill_merge": False}):
+            non = ezbuild.registry.get_writer("txt")(progress=False, **kwargs).render(bld)
+            out = tmp_path / "s.txt"
+            schematic_to_txt(data, out, progress=False, **kwargs)
+            assert out.read_text(encoding="utf-8") == non
+
+    def test_streaming_cmd_json_matches(self, tmp_path):
+        """mcstructure 命令方块（block_position_data）流式 cmd_json 与非流式一致。"""
+        from ezbuild.streaming import schematic_to_cmd_json
+
+        data = self._mcstructure_bytes(_make_building())
+        bld = ezbuild.convert_read_from(data, "mcstructure")
+        non = ezbuild.registry.get_writer("cmd_json")().render(bld)
+        out = tmp_path / "c.json"
+        schematic_to_cmd_json(data, out)
+        assert out.read_text(encoding="utf-8") == non
+
+    def test_schematic_source_supports_mcstructure(self):
+        """SchematicSource 直接读 mcstructure（尺寸/方块/命令方块）。"""
+        from ezbuild.streaming import SchematicSource
+
+        data = self._mcstructure_bytes(_make_building())
+        src = SchematicSource(data)
+        assert src.size == (3, 1, 1)
+        blocks = {(x, y, z): name for x, y, z, name, _s in src.iter_all_blocks()}
+        assert blocks.get((0, 0, 0)) == "stone"
+        assert {(c.x, c.y, c.z) for c in src.command_blocks()} == {(1, 0, 0), (2, 0, 0)}
