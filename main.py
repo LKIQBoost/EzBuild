@@ -67,9 +67,21 @@ def cmd_world_decrypt(args: argparse.Namespace) -> int:
     return 0
 
 
-def _read_building(src: str) -> ezbuild.Building | ezbuild.Song:
-    """读取一个建筑或音乐文件（按扩展名自动识别）。"""
-    return ezbuild.convert_read(src)
+def _read_building(src: str, args: argparse.Namespace) -> ezbuild.Building | ezbuild.Song:
+    """读取一个建筑或音乐文件（按扩展名自动识别）。
+
+    图片输入（image）额外透传尺寸/抖动/朝向选项。
+    """
+    options: dict = {}
+    if registry.format_for_path(src) == "image":
+        options = {
+            "width": args.width,
+            "height": args.height,
+            "dither": args.dither,
+            "bumpy": args.bumpy,
+            "plane": args.plane,
+        }
+    return ezbuild.convert_read(src, **options)
 
 
 def _print_schem_info(src: str) -> None:
@@ -337,7 +349,7 @@ def _convert_one(src: str, args: argparse.Namespace) -> tuple[str, str]:
         return output, to_format
 
     print(f"[1/2] 读取: {src}")
-    building = _read_building(src)
+    building = _read_building(src, args)
     if isinstance(building, ezbuild.Song) and to_format not in ezbuild.MUSIC_FORMATS:
         # 音乐 → 建筑：先转成命令方块音乐机（默认把超范围音符八度折叠保证音准；
         # --raw-octave 保留原始八度）
@@ -440,10 +452,17 @@ def main(argv=None) -> int:
         except (AttributeError, ValueError):
             pass
     print(gradient_ascii("Ez Build", start_color=(0, 255, 128), end_color=(0, 0, 255)))
+    # add_help=False：把 -h 让给图片高度（--height），帮助改用 --help
     parser = argparse.ArgumentParser(
         prog="ezbuild",
         description="Minecraft 建筑文件格式转换工具",
         usage="%(prog)s <输出格式> -i <输入文件...> [-o 输出文件]",
+        add_help=False,
+    )
+    parser.add_argument(
+        "--help",
+        action="help",
+        help="显示帮助并退出（注意：-h 是图片高度 height）",
     )
     parser.add_argument(
         "format",
@@ -469,6 +488,39 @@ def main(argv=None) -> int:
         "--output",
         metavar="FILE",
         help="输出文件路径（仅单个输入文件时可用；默认与输入同名同目录）",
+    )
+    parser.add_argument(
+        "-w",
+        "--width",
+        type=int,
+        default=None,
+        metavar="N",
+        help="图片输入宽度（像素）；只给 -w 时高度按原图宽高比计算",
+    )
+    parser.add_argument(
+        "-h",
+        "--height",
+        type=int,
+        default=None,
+        metavar="N",
+        help="图片输入高度（像素）；只给 -h 时宽度按原图宽高比计算",
+    )
+    parser.add_argument(
+        "--dither",
+        choices=("nearest", "ordered", "floyd"),
+        default="floyd",
+        help="图片抖动模式：nearest 最近色 / ordered 有序 / floyd 误差扩散（默认）",
+    )
+    parser.add_argument(
+        "--bumpy",
+        action="store_true",
+        help="图片转建筑时每个方块色额外加入暗/亮变体（更立体）",
+    )
+    parser.add_argument(
+        "--plane",
+        choices=("horizontal", "vertical"),
+        default="horizontal",
+        help="图片输出朝向：horizontal 水平地板（默认，X=宽 Z=高）/ vertical 竖直墙（X=宽 Y=高）",
     )
     parser.add_argument(
         "--all-states",

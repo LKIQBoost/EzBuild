@@ -73,11 +73,14 @@ def _coerce_for_write(model, format_name: str | None):
     return model
 
 
-def convert_read(source: Union[str, Path, bytes]) -> Building | Song:
+def convert_read(
+    source: Union[str, Path, bytes], **options
+) -> Building | Song:
     """按扩展名自动识别输入格式并读取建筑或歌曲。
 
     ``source`` 可以是文件路径或原始字节（字节时需额外指定格式，
-    见 :func:`convert_read_from`）。
+    见 :func:`convert_read_from`）。``options`` 透传给 Reader 构造函数
+    （如图片的 width/height/dither/plane）。
     """
     fmt = registry.format_for_path(source) if not isinstance(source, bytes) else None
     if fmt is None:
@@ -85,19 +88,19 @@ def convert_read(source: Union[str, Path, bytes]) -> Building | Song:
             f"无法根据输入推断格式: {source!r}，"
             f"支持的输入格式: {registry.list_readers()}"
         )
-    return convert_read_from(source, fmt)
+    return convert_read_from(source, fmt, **options)
 
 
 def convert_read_from(
-    source: Union[str, Path, bytes], format_name: str
+    source: Union[str, Path, bytes], format_name: str, **options
 ) -> Building | Song:
-    """用指定格式读取建筑或歌曲。"""
+    """用指定格式读取建筑或歌曲（``options`` 透传给 Reader 构造函数）。"""
     cls = registry.get_reader(format_name)
     if cls is None:
         raise ValueError(
             f"未知输入格式 {format_name!r}，可用: {registry.list_readers()}"
         )
-    return cls().read(source)
+    return cls(**options).read(source)
 
 
 def convert_write(

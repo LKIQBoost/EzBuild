@@ -60,6 +60,21 @@ python main.py mcstructure -i 巨型建筑.schem
 python main.py schem -i 巨型建筑.schem
 python main.py cmd_json -i 巨型建筑.schematic
 
+# 图片转建筑：每个像素按 RGB 最近色映射为方块（默认 Floyd-Steinberg 误差扩散）
+python main.py schem -i 像素画.png -w 100          # 只给 -w：高按原图宽高比自动计算
+python main.py mcstructure -i 照片.png -w 128 -h 96  # 宽高都给出则按给出的值
+python main.py txt -i 图.png                        # 都不给则用原图像素尺寸
+python main.py schem -i 图.png --dither nearest     # nearest / ordered / floyd(默认)
+python main.py schem -i 图.png --plane vertical     # vertical 竖直墙(X=宽,Y=高)；默认 horizontal 水平地板(X=宽,Z=高)
+python main.py schem -i 图.png --bumpy              # 每个方块色额外加入暗/亮变体（更立体）
+
+> 图片输入依赖 **Pillow**（已列入依赖）。注意 `-h` 已让位给**图片高度 height**，
+> 查看帮助请用 `--help`。默认输出**水平地板**（X=宽、Z=高、厚 1，俯视），
+> `--plane vertical` 切换为**竖直墙**（X=宽、Y=高、厚 1）。调色板固定为 16 色羊毛
+> 加 Stone/Grass/Dirt/Planks/Water/Leaves/Lapis/Sandstone/Web/Gold/Iron/TNT/Diamond/
+> Ice/Clay/Netherrack/Emerald/Melon/Red Sandstone/Quartz/Prismarine/Redstone/Purpur/
+> Nether Wart/Bone（选用现代方块平均色）。
+
 # mcstructure → 分区块 txt 同样走流式（不建 Building 模型，输出逐字节一致）。
 # block_indices 用 nbt_lite 走 numpy 批量解析（不逐元素建对象）：
 # 实测 27MB / 347 万元素 ~0.3s、峰值内存 ~41MB
@@ -182,6 +197,7 @@ ezbuild.convert_write(building, "命令方块.json", "cmd_json")  # 输出
 | 输入 | `schem` | Java 版 Sponge `.schem` 结构文件（Palette/BlockData） |
 | 输入 | `txt` | `setblock`/`fill` 指令文本（未分区块） |
 | 输入 | `ibi` | IBI 导入包（setblock 文本 + 命令方块 JSON，XOR 加密） |
+| 输入 | `image` | 位图 `.png/.jpg/.jpeg/.bmp/.gif/.webp/.tga`（-w/-h 尺寸，默认水平地板） |
 | 输入 | `mid` | MIDI（SMF）音乐文件 |
 | 输入 | `nbs` | OpenNoteBlockStudio NBS 音乐文件 |
 | 输出 | `cmd_json` | 命令方块 JSON（`posx/posy/posz + BlockMode + Command + TickDelay + IsRedStoneMode + IsConditional`） |
@@ -221,6 +237,7 @@ ezbuild/
 │   │   ├── bdx.py
 │   │   ├── schematic.py
 │   │   ├── txt.py
+│   │   ├── image.py     # 图片 → 方块墙/地板（-w/-h/--dither/--plane/--bumpy）
 │   │   └── ibi.py
 │   ├── writers/         # 输出渲染器（自动注册）
 │   │   ├── base.py      # Writer 抽象基类
@@ -340,6 +357,7 @@ python -m pytest tests/ -q
 
 - `nbtlib` — mcstructure / NBT 解析
 - `brotli` — BDX 解压
+- `pillow` — 图片输入解码（`image` Reader）
 - `tqdm` + `rich` — 流式转换进度条（`tqdm.rich` 美化）
 
 ## 引用与致谢
